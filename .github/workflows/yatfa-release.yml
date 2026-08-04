@@ -1,0 +1,82 @@
+name: yatfa-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and publish (e.g. yatfa-1.45.0-1). If omitted, builds main HEAD and tags it yatfa-<version>-<short-sha>."
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - aarch64-unknown-linux-gnu
+          - x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install zig
+        run: python3 -m pip install ziglang
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked --version 0.23.0
+
+      - name: Build
+        run: cargo zigbuild --release --bin goose --target ${{ matrix.target }} --no-default-features --features "rustls-tls"
+
+      - name: Strip
+        run: |
+          strip target/${{ matrix.target }}/release/goose || true
+
+      - name: Rename binary
+        run: |
+          cp target/${{ matrix.target }}/release/goose goose-linux-${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: goose-${{ matrix.target }}
+          path: goose-linux-${{ matrix.target }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            VERSION=$(awk '/^\[workspace\.package\]/{f=1} f && /^version = /{gsub(/"/, "", $3); print $3; exit}' Cargo.toml)
+            SHA=$(git rev-parse --short HEAD)
+            echo "name=yatfa-${VERSION}-${SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: ${{ steps.tag.outputs.name }}
+          generate_release_notes: true
+          files: |
+            artifacts/*/goose-linux-*
