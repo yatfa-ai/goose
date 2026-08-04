@@ -251,7 +251,7 @@ where
         .await?;
 
     let mut cli_session = CliSession::new(
-        agent,
+        agent.into(),
         session.id,
         false,
         None,
