@@ -1,0 +1,90 @@
+name: yatfa-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and publish (e.g. yatfa-1.48.0-kestrel). If omitted, builds main HEAD and tags it yatfa-<version>-<codename>."
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - aarch64-unknown-linux-gnu
+          - x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install zig
+        run: python3 -m pip install ziglang
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked --version 0.23.0
+
+      - name: Build
+        run: cargo zigbuild --release --bin goose --target ${{ matrix.target }} --no-default-features --features "rustls-tls"
+
+      - name: Strip
+        run: |
+          strip target/${{ matrix.target }}/release/goose || true
+
+      - name: Rename binary
+        run: |
+          cp target/${{ matrix.target }}/release/goose goose-linux-${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: goose-${{ matrix.target }}
+          path: goose-linux-${{ matrix.target }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            VERSION=$(awk '/^\[workspace\.package\]/{f=1} f && /^version = /{gsub(/"/, "", $3); print $3; exit}' Cargo.toml)
+            # Codename instead of the short sha: deterministic from the commit,
+            # so the same tree always yields the same name and a release can be
+            # said out loud. A word collision within one version fails the
+            # release step visibly — dispatch with an explicit `tag` to pick a
+            # different name by hand.
+            WORDS="alder anvil aspen atlas aurora avocet badger basil basalt beacon birch bison blizzard blossom bog brant briar brook buffalo canal canyon cedar cinder cliff clover cobalt comet copper coral cove crane cricket cypress dawn delta dew dune eagle ember fern fjord flint fox garnet geyser ginger glacier granite grove gull harbor hare hawthorn hazel heron hollow ibis indigo ivory jade jetty juniper kestrel kelp lagoon larch lilac lichen linnet lynx mackerel magenta maple marlin marsh mercury mimosa mint monsoon moose moss nebula nickel nimbus oak onyx opal osprey otter palm panther pewter pike plover poppy quartz quill raven reef ridge robin rust saffron sage salmon sedge sequoia slate snow solstice sparrow spruce stone sumac teal thistle thorn thunder tide timber topaz trout tundra umber vine violet walnut warbler willow winter wren yarrow zephyr zinc"
+            set -- $WORDS
+            IDX=$(( 0x$(git rev-parse HEAD | cut -c1-8) % $# ))
+            WORD=$(echo $WORDS | cut -d' ' -f$((IDX+1)))
+            echo "name=yatfa-${VERSION}-${WORD}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: ${{ steps.tag.outputs.name }}
+          generate_release_notes: true
+          files: |
+            artifacts/*/goose-linux-*
