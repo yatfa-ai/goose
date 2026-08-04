@@ -377,6 +377,7 @@ mod tests {
             additional_source_roots: Vec::new(),
             session_cwd: None,
             enable_scheduler: false,
+            agent_manager: None,
         });
         let agent = server.create_agent().await.unwrap();
 

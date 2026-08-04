@@ -21,6 +21,10 @@ pub struct AcpServerFactoryConfig {
     /// the connector's absolute path is meaningless on the host machine.
     pub session_cwd: Option<std::path::PathBuf>,
     pub enable_scheduler: bool,
+    /// Share an existing AgentManager instead of building one. Set by an
+    /// external agent owner (an interactive `goose run` session) so ACP
+    /// `session/load` resolves to the agent that session is already driving.
+    pub agent_manager: Option<Arc<crate::execution::manager::AgentManager>>,
 }
 
 pub struct AcpServer {
@@ -124,6 +128,7 @@ impl AcpServer {
             session_cwd,
             scheduler,
             active_prompt_runs: self.active_prompt_runs.clone(),
+            agent_manager: self.config.agent_manager.clone(),
         })
         .await?;
         info!("Created new ACP agent");
@@ -145,6 +150,7 @@ mod tests {
             additional_source_roots: Vec::new(),
             session_cwd: None,
             enable_scheduler,
+            agent_manager: None,
         })
     }
 
