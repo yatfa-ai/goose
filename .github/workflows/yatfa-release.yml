@@ -46,7 +46,7 @@ jobs:
         run: |
           cp target/${{ matrix.target }}/release/goose goose-linux-${{ matrix.target }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: goose-${{ matrix.target }}
           path: goose-linux-${{ matrix.target }}
