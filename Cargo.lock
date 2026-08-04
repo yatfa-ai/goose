@@ -1208,6 +1208,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b25655df2c3cdd83c5e5b293b88acd880332b2ddadd7c30ac43144fdc0033da9"
+
+[[package]]
 name = "base64-simd"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4978,7 +4984,7 @@ dependencies = [
  "opentelemetry_sdk 0.32.1",
  "pastey",
  "pctx_code_mode",
- "pem",
+ "pem 4.0.0",
  "process-wrap",
  "pulldown-cmark",
  "rand 0.10.2",
@@ -5226,7 +5232,7 @@ dependencies = [
  "goose-local-inference",
  "goose-provider-types",
  "include_dir",
- "pem",
+ "pem 4.0.0",
  "pkcs1",
  "pkcs8",
  "reqwest 0.13.4",
@@ -6368,7 +6374,7 @@ dependencies = [
  "js-sys",
  "p256",
  "p384",
- "pem",
+ "pem 3.0.6",
  "rand 0.8.6",
  "rsa",
  "serde",
@@ -8008,6 +8014,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pem"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d354a98a3d1251555de99e8fdd8afda05573c31b82f59063a7b0a29b5527f120"
+dependencies = [
+ "base64 0.23.0",
+ "serde_core",
+]
+
+[[package]]
 name = "pem-rfc7468"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8795,7 +8811,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57f6d249aad744e274e682777a50283a225a32705394ee6d5fcc01efa25e4055"
 dependencies = [
  "aws-lc-rs",
- "pem",
+ "pem 3.0.6",
  "ring",
  "rustls-pki-types",
  "time",
@@ -10062,7 +10078,7 @@ dependencies = [
  "const-oid 0.9.6",
  "der",
  "digest 0.10.7",
- "pem",
+ "pem 3.0.6",
  "rand_core 0.9.5",
  "sha2 0.10.9",
  "signature",
@@ -10179,7 +10195,7 @@ checksum = "56f034e86c3b8d91b32608c83f4a18939eed32c6ca08d17d2f52b88be365aac6"
 dependencies = [
  "base64 0.22.1",
  "hex",
- "pem",
+ "pem 3.0.6",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -10196,7 +10212,7 @@ dependencies = [
  "const-oid 0.9.6",
  "hex",
  "jiff",
- "pem",
+ "pem 3.0.6",
  "rustls-pki-types",
  "rustls-webpki",
  "serde",
