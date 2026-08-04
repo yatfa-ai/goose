@@ -95,6 +95,14 @@ impl AgentManager {
         self.agent_config.session_manager.as_ref()
     }
 
+    pub fn session_manager_arc(&self) -> Arc<SessionManager> {
+        Arc::clone(&self.agent_config.session_manager)
+    }
+
+    pub fn permission_manager(&self) -> Arc<PermissionManager> {
+        Arc::clone(&self.agent_config.permission_manager)
+    }
+
     pub async fn set_default_provider(&self, provider: Arc<dyn crate::providers::base::Provider>) {
         debug!("Setting default provider on AgentManager");
         *self.default_provider.write().await = Some(provider);
@@ -105,6 +113,15 @@ impl AgentManager {
             .get_or_create_agent_with_runtime_context(session_id, RuntimeContext::default())
             .await?
             .agent)
+    }
+
+    /// Register a pre-built agent under a session id so later `get_or_create_*`
+    /// calls for that id return this agent (Arc-cloned) instead of building a
+    /// fresh one. Lets an external owner of an Agent (e.g. an interactive
+    /// `goose run` session) share it with ACP `session/load` against the same id.
+    pub async fn insert_existing_agent(&self, session_id: String, agent: Arc<Agent>) {
+        let mut sessions = self.sessions.write().await;
+        sessions.put(session_id, agent);
     }
 
     pub async fn get_or_create_agent_with_runtime_context(
@@ -793,5 +810,75 @@ mod tests {
 
         assert_eq!(a1.goose_mode().await, GooseMode::Approve);
         assert_eq!(a2.goose_mode().await, GooseMode::Auto);
+    }
+}
+
+#[cfg(test)]
+mod shared_agent_tests {
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    use crate::agents::{Agent, AgentConfig, GoosePlatform};
+    use crate::config::permission::PermissionManager;
+    use crate::config::GooseMode;
+    use crate::session::SessionManager;
+
+    use super::AgentManager;
+
+    async fn manager(temp_dir: &TempDir) -> AgentManager {
+        let session_manager = Arc::new(SessionManager::new(temp_dir.path().to_path_buf()));
+        let agent_config = AgentConfig::new(
+            session_manager,
+            PermissionManager::instance(),
+            None,
+            GooseMode::default(),
+            false,
+            GoosePlatform::GooseCli,
+        );
+        AgentManager::new(agent_config, Some(100)).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn registered_agent_is_returned_for_its_session_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = manager(&temp_dir).await;
+
+        let owner_agent = Arc::new(Agent::new());
+        manager
+            .insert_existing_agent("shared-session".to_string(), Arc::clone(&owner_agent))
+            .await;
+
+        let resolved = manager
+            .get_or_create_agent("shared-session".to_string())
+            .await
+            .unwrap();
+
+        assert!(
+            Arc::ptr_eq(&owner_agent, &resolved),
+            "an externally owned agent registered under a session id must be the SAME Arc the \
+             manager resolves for that id — that identity is what lets an interactive session and \
+             an ACP client drive one agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn registration_is_scoped_to_its_session_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = manager(&temp_dir).await;
+
+        let owner_agent = Arc::new(Agent::new());
+        manager
+            .insert_existing_agent("shared-session".to_string(), Arc::clone(&owner_agent))
+            .await;
+
+        let other = manager
+            .get_or_create_agent("unrelated-session".to_string())
+            .await
+            .unwrap();
+
+        assert!(
+            !Arc::ptr_eq(&owner_agent, &other),
+            "registering an agent must not hijack unrelated session ids"
+        );
     }
 }
