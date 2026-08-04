@@ -706,9 +706,8 @@ async fn maybe_serve_acp_on_run(agent: Arc<Agent>, session_id: &str) {
     use goose::agents::AgentConfig;
     use goose::agents::GoosePlatform;
     use goose::config::paths::Paths;
-    use goose::config::permission::PermissionManager;
+
     use goose::execution::manager::AgentManager;
-    use goose::session::SessionManager;
 
     let port = match std::env::var("GOOSE_RUN_SERVE_ACP_PORT") {
         Ok(raw) => raw.trim().to_string(),
@@ -724,10 +723,10 @@ async fn maybe_serve_acp_on_run(agent: Arc<Agent>, session_id: &str) {
         }
     };
 
-    let session_manager = Arc::new(SessionManager::new(Paths::data_dir()));
+    let session_manager = Arc::clone(&agent.config.session_manager);
     let agent_config = AgentConfig::new(
-        Arc::clone(&session_manager),
-        Arc::new(PermissionManager::new(Paths::config_dir())),
+        session_manager,
+        Arc::clone(&agent.config.permission_manager),
         None,
         Config::global().get_goose_mode().unwrap_or_default(),
         false,
