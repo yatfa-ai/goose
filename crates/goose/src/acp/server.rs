@@ -196,6 +196,12 @@ pub struct GooseAcpAgentOptions {
     pub goose_platform: GoosePlatform,
     pub additional_source_roots: Vec<SourceRoot>,
     pub scheduler: Option<Arc<dyn SchedulerTrait>>,
+    /// Pre-built AgentManager to share with an external agent owner (e.g. an
+    /// interactive `goose run` session). When set, `new` reuses this manager
+    /// — and the SessionManager/PermissionManager inside it — instead of
+    /// constructing a fresh one, so `session/load` against an id the external
+    /// owner has registered returns the same `Arc<Agent>`.
+    pub agent_manager: Option<Arc<AgentManager>>,
 }
 
 pub struct GooseAcpAgent {
@@ -636,25 +642,43 @@ impl GooseAcpAgent {
 
     // TODO: goose reads Paths::in_state_dir globally (e.g. RequestLog), ignoring this data_dir.
     pub async fn new(options: GooseAcpAgentOptions) -> Result<Self> {
-        let session_manager = Arc::new(SessionManager::new(options.data_dir));
+        // If a pre-built AgentManager is supplied, reuse it AND the
+        // SessionManager/PermissionManager it owns, so an agent registered
+        // under a session id by the external owner is the same `Arc<Agent>`
+        // this server returns for that id. Building fresh managers here would
+        // silently split the world: the owner's agent and the server's agent
+        // would share storage but never share an `Arc`.
+        let (agent_manager, session_manager, permission_manager) = match options.agent_manager {
+            Some(am) => {
+                let session_manager = am.session_manager_arc();
+                let permission_manager = am.permission_manager();
+                (am, session_manager, permission_manager)
+            }
+            None => {
+                let session_manager = Arc::new(SessionManager::new(options.data_dir));
 
-        // Eagerly initialize the SQLite pool so it's ready when providers/sessions need it.
-        let storage_clone = session_manager.storage().clone();
-        tokio::spawn(async move {
-            let _ = storage_clone.pool().await;
-        });
+                // Eagerly initialize the SQLite pool so it's ready when providers/sessions need it.
+                let storage_clone = session_manager.storage().clone();
+                tokio::spawn(async move {
+                    let _ = storage_clone.pool().await;
+                });
 
-        let permission_manager = Arc::new(PermissionManager::new(options.config_dir.clone()));
+                let permission_manager =
+                    Arc::new(PermissionManager::new(options.config_dir.clone()));
+                let agent_config = AgentConfig::new(
+                    Arc::clone(&session_manager),
+                    Arc::clone(&permission_manager),
+                    options.scheduler,
+                    Config::global().get_goose_mode().unwrap_or_default(),
+                    options.disable_session_naming,
+                    options.goose_platform.clone(),
+                );
+                let am = Arc::new(AgentManager::new(agent_config, None).await?);
+                (am, session_manager, permission_manager)
+            }
+        };
+
         let provider_inventory = ProviderInventoryService::new(session_manager.storage().clone());
-        let agent_config = AgentConfig::new(
-            Arc::clone(&session_manager),
-            Arc::clone(&permission_manager),
-            options.scheduler,
-            Config::global().get_goose_mode().unwrap_or_default(),
-            options.disable_session_naming,
-            options.goose_platform.clone(),
-        );
-        let agent_manager = Arc::new(AgentManager::new(agent_config, None).await?);
 
         Ok(Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -2300,6 +2324,7 @@ pub async fn run(builtins: Vec<String>, enable_scheduler: bool) -> Result<()> {
             goose_platform: GoosePlatform::GooseCli,
             additional_source_roots: Vec::new(),
             enable_scheduler,
+            agent_manager: None,
         },
     );
     let agent = server.create_agent().await?;

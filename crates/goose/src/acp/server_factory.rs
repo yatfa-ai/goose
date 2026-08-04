@@ -17,6 +17,10 @@ pub struct AcpServerFactoryConfig {
     pub goose_platform: GoosePlatform,
     pub additional_source_roots: Vec<SourceRoot>,
     pub enable_scheduler: bool,
+    /// Share an existing AgentManager instead of building one. Set by an
+    /// external agent owner (an interactive `goose run` session) so ACP
+    /// `session/load` resolves to the agent that session is already driving.
+    pub agent_manager: Option<Arc<crate::execution::manager::AgentManager>>,
 }
 
 pub struct AcpServer {
@@ -95,6 +99,7 @@ impl AcpServer {
             goose_platform: self.config.goose_platform.clone(),
             additional_source_roots: self.config.additional_source_roots.clone(),
             scheduler,
+            agent_manager: self.config.agent_manager.clone(),
         })
         .await?;
         info!("Created new ACP agent");
@@ -115,6 +120,7 @@ mod tests {
             goose_platform: GoosePlatform::GooseCli,
             additional_source_roots: Vec::new(),
             enable_scheduler,
+            agent_manager: None,
         })
     }
 

@@ -44,6 +44,14 @@ pub struct AgentManager {
     /// `Arc<Mutex<()>>` stays alive as long as any caller still holds it,
     /// even after the HashMap entry is removed.
     creation_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Agents owned by something outside the manager and registered with
+    /// `insert_existing_agent`, held here rather than in `sessions` because
+    /// they are not cache entries.  Dropping a cached agent is harmless — the
+    /// next caller rebuilds an equivalent one from persisted state — but
+    /// dropping one of these would hand that caller a second agent while the
+    /// owner keeps driving the first, and both would write to the same
+    /// session.  Lifetime belongs to the owner, via `remove_existing_agent`.
+    owned_agents: Arc<RwLock<HashMap<String, Arc<Agent>>>>,
 }
 
 impl AgentManager {
@@ -57,6 +65,7 @@ impl AgentManager {
             default_provider: Arc::new(RwLock::new(None)),
             cancel_tokens: Arc::new(RwLock::new(HashMap::new())),
             creation_locks: Arc::new(Mutex::new(HashMap::new())),
+            owned_agents: Arc::new(RwLock::new(HashMap::new())),
         };
 
         Ok(manager)
@@ -95,6 +104,14 @@ impl AgentManager {
         self.agent_config.session_manager.as_ref()
     }
 
+    pub fn session_manager_arc(&self) -> Arc<SessionManager> {
+        Arc::clone(&self.agent_config.session_manager)
+    }
+
+    pub fn permission_manager(&self) -> Arc<PermissionManager> {
+        Arc::clone(&self.agent_config.permission_manager)
+    }
+
     pub async fn set_default_provider(&self, provider: Arc<dyn crate::providers::base::Provider>) {
         debug!("Setting default provider on AgentManager");
         *self.default_provider.write().await = Some(provider);
@@ -107,11 +124,43 @@ impl AgentManager {
             .agent)
     }
 
+    /// Register a pre-built agent under a session id so later `get_or_create_*`
+    /// calls for that id return this agent (Arc-cloned) instead of building a
+    /// fresh one. Lets an external owner of an Agent (e.g. an interactive
+    /// `goose run` session) share it with ACP `session/load` against the same id.
+    ///
+    /// The agent is held outside the LRU cache for its owner's lifetime and is
+    /// never evicted.  Any cached agent for the same id is dropped, so one id
+    /// still means one agent.
+    pub async fn insert_existing_agent(&self, session_id: String, agent: Arc<Agent>) {
+        self.sessions.write().await.pop(session_id.as_str());
+        self.owned_agents.write().await.insert(session_id, agent);
+    }
+
+    /// Release an agent registered with `insert_existing_agent`, returning
+    /// whether one was registered.  The id then behaves like any other: the
+    /// next `get_or_create_*` builds a fresh agent from persisted state.
+    pub async fn remove_existing_agent(&self, session_id: &str) -> bool {
+        self.owned_agents.write().await.remove(session_id).is_some()
+    }
+
+    async fn owned_agent(&self, session_id: &str) -> Option<Arc<Agent>> {
+        self.owned_agents.read().await.get(session_id).cloned()
+    }
+
     pub async fn get_or_create_agent_with_runtime_context(
         &self,
         session_id: String,
         runtime_context: RuntimeContext,
     ) -> Result<AgentManagerGetResult> {
+        if let Some(agent) = self.owned_agent(&session_id).await {
+            return Ok(AgentManagerGetResult {
+                agent,
+                agent_created: false,
+                extension_results: Vec::new(),
+            });
+        }
+
         // Fast path: agent already cached.
         {
             let mut sessions = self.sessions.write().await;
@@ -172,7 +221,15 @@ impl AgentManager {
         runtime_context: RuntimeContext,
     ) -> Result<AgentManagerGetResult> {
         // Re-check under the creation lock: another caller may have
-        // finished creating the agent while we were waiting.
+        // finished creating the agent, or an owner may have registered one,
+        // while we were waiting.
+        if let Some(agent) = self.owned_agent(session_id).await {
+            return Ok(AgentManagerGetResult {
+                agent,
+                agent_created: false,
+                extension_results: Vec::new(),
+            });
+        }
         {
             let mut sessions = self.sessions.write().await;
             if let Some(existing) = sessions.get(session_id) {
@@ -255,6 +312,16 @@ impl AgentManager {
             }
         }
 
+        // An owner that registered while we were building wins: handing back
+        // the agent we just made would put two agents on one session.
+        if let Some(agent) = self.owned_agent(session_id).await {
+            return Ok(AgentManagerGetResult {
+                agent,
+                agent_created: false,
+                extension_results: Vec::new(),
+            });
+        }
+
         let mut sessions = self.sessions.write().await;
         if let Some(existing) = sessions.get(session_id) {
             return Ok(AgentManagerGetResult {
@@ -308,11 +375,13 @@ impl AgentManager {
         if let Some(token) = self.cancel_tokens.write().await.remove(session_id) {
             token.cancel();
         }
+        let released = self.remove_existing_agent(session_id).await;
         let mut sessions = self.sessions.write().await;
-        sessions
-            .pop(session_id)
-            .ok_or_else(|| anyhow::anyhow!("Session {} not found", session_id))?;
+        let popped = sessions.pop(session_id).is_some();
         drop(sessions);
+        if !released && !popped {
+            return Err(anyhow::anyhow!("Session {} not found", session_id));
+        }
         // Best-effort prune of the per-session creation lock so the
         // HashMap doesn't grow unbounded.  Any caller still holding a
         // clone of the Arc keeps the underlying Mutex alive until it
@@ -327,22 +396,28 @@ impl AgentManager {
         if let Some(token) = self.cancel_tokens.write().await.remove(session_id) {
             token.cancel();
         }
+        let released = self.remove_existing_agent(session_id).await;
         let mut sessions = self.sessions.write().await;
-        if sessions.pop(session_id).is_none() {
+        let popped = sessions.pop(session_id).is_some();
+        drop(sessions);
+        if !released && !popped {
             return Ok(());
         }
-        drop(sessions);
         self.prune_creation_lock(session_id).await;
         info!("Removed session {}", session_id);
         Ok(())
     }
 
     pub async fn has_session(&self, session_id: &str) -> bool {
+        if self.owned_agents.read().await.contains_key(session_id) {
+            return true;
+        }
         self.sessions.read().await.contains(session_id)
     }
 
     pub async fn session_count(&self) -> usize {
-        self.sessions.read().await.len()
+        let owned = self.owned_agents.read().await.len();
+        owned + self.sessions.read().await.len()
     }
 
     /// Atomically check if busy and register a cancel token. Returns Err if already busy.
@@ -892,5 +967,135 @@ mod tests {
 
         assert_eq!(a1.goose_mode().await, GooseMode::Approve);
         assert_eq!(a2.goose_mode().await, GooseMode::Auto);
+    }
+}
+
+#[cfg(test)]
+mod shared_agent_tests {
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    use crate::agents::{Agent, AgentConfig, GoosePlatform};
+    use crate::config::permission::PermissionManager;
+    use crate::config::GooseMode;
+    use crate::session::SessionManager;
+
+    use super::AgentManager;
+
+    async fn manager_with_capacity(temp_dir: &TempDir, capacity: usize) -> AgentManager {
+        let session_manager = Arc::new(SessionManager::new(temp_dir.path().to_path_buf()));
+        let agent_config = AgentConfig::new(
+            session_manager,
+            PermissionManager::instance(),
+            None,
+            GooseMode::default(),
+            false,
+            GoosePlatform::GooseCli,
+        );
+        AgentManager::new(agent_config, Some(capacity))
+            .await
+            .unwrap()
+    }
+
+    async fn manager(temp_dir: &TempDir) -> AgentManager {
+        manager_with_capacity(temp_dir, 100).await
+    }
+
+    #[tokio::test]
+    async fn registered_agent_is_returned_for_its_session_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = manager(&temp_dir).await;
+
+        let owner_agent = Arc::new(Agent::new());
+        manager
+            .insert_existing_agent("shared-session".to_string(), Arc::clone(&owner_agent))
+            .await;
+
+        let resolved = manager
+            .get_or_create_agent("shared-session".to_string())
+            .await
+            .unwrap();
+
+        assert!(
+            Arc::ptr_eq(&owner_agent, &resolved),
+            "an externally owned agent registered under a session id must be the SAME Arc the \
+             manager resolves for that id — that identity is what lets an interactive session and \
+             an ACP client drive one agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn registration_is_scoped_to_its_session_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = manager(&temp_dir).await;
+
+        let owner_agent = Arc::new(Agent::new());
+        manager
+            .insert_existing_agent("shared-session".to_string(), Arc::clone(&owner_agent))
+            .await;
+
+        let other = manager
+            .get_or_create_agent("unrelated-session".to_string())
+            .await
+            .unwrap();
+
+        assert!(
+            !Arc::ptr_eq(&owner_agent, &other),
+            "registering an agent must not hijack unrelated session ids"
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_agent_survives_lru_eviction() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = manager_with_capacity(&temp_dir, 2).await;
+
+        let owner_agent = Arc::new(Agent::new());
+        manager
+            .insert_existing_agent("shared-session".to_string(), Arc::clone(&owner_agent))
+            .await;
+
+        for i in 0..5 {
+            manager
+                .get_or_create_agent(format!("filler-{i}"))
+                .await
+                .unwrap();
+        }
+
+        let resolved = manager
+            .get_or_create_agent("shared-session".to_string())
+            .await
+            .unwrap();
+
+        assert!(
+            Arc::ptr_eq(&owner_agent, &resolved),
+            "an agent whose owner is still driving it must not be evicted by session churn — \
+             rebuilding it from persisted state would silently produce a second agent writing \
+             to the same session"
+        );
+    }
+
+    #[tokio::test]
+    async fn released_agent_is_rebuilt_like_any_other() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = manager(&temp_dir).await;
+
+        let owner_agent = Arc::new(Agent::new());
+        manager
+            .insert_existing_agent("shared-session".to_string(), Arc::clone(&owner_agent))
+            .await;
+
+        assert!(manager.remove_existing_agent("shared-session").await);
+        assert!(!manager.remove_existing_agent("shared-session").await);
+
+        let rebuilt = manager
+            .get_or_create_agent("shared-session".to_string())
+            .await
+            .unwrap();
+
+        assert!(
+            !Arc::ptr_eq(&owner_agent, &rebuilt),
+            "once the owner releases the id it must stop pinning that agent"
+        );
     }
 }
