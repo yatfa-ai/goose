@@ -898,7 +898,7 @@ pub async fn build_session(session_config: SessionBuilderConfig) -> CliSession {
     let debug_mode = session_config.debug || config.get_param("GOOSE_DEBUG").unwrap_or(false);
 
     let session = CliSession::new(
-        Arc::try_unwrap(agent_ptr).unwrap_or_else(|_| panic!("There should be no more references")),
+        Arc::clone(&agent_ptr),
         session_id.clone(),
         debug_mode,
         session_config.scheduled_job_id.clone(),
@@ -917,10 +917,115 @@ pub async fn build_session(session_config: SessionBuilderConfig) -> CliSession {
             session_config.resume,
             &effective_provider_name,
             &effective_model_name,
-            &Some(session_id),
+            &Some(session_id.clone()),
         );
     }
+
+    maybe_serve_acp_on_run(Arc::clone(&agent_ptr), &session_id).await;
+
     session
+}
+
+/// Optionally expose this session's agent to ACP clients (an interactive
+/// `goose run` becoming an ACP host) so a dispatcher can `session/load` the id
+/// and `steer` the in-flight turn — without the run giving up its TUI.
+///
+/// Triggered by `GOOSE_RUN_SERVE_ACP_PORT`. Off by default; an operator opts a
+/// run into it explicitly. The agent registered here is the same `Arc<Agent>`
+/// the run is about to drive, so ACP callers resolve to the live agent, not a
+/// freshly-built twin. Loopback-only and unauthenticated by default — the
+/// bridge→serve link is inside one container — but `GOOSE_SERVER__SECRET_KEY`
+/// is honored when set.
+async fn maybe_serve_acp_on_run(agent: Arc<Agent>, session_id: &str) {
+    use goose::acp::server::AcpBuiltinSelection;
+    use goose::acp::server_factory::{AcpServer, AcpServerFactoryConfig};
+    use goose::agents::AgentConfig;
+    use goose::agents::GoosePlatform;
+    use goose::config::paths::Paths;
+
+    use goose::execution::manager::AgentManager;
+
+    let port = match std::env::var("GOOSE_RUN_SERVE_ACP_PORT") {
+        Ok(raw) => raw.trim().to_string(),
+        Err(_) => return,
+    };
+    let port: u16 = match port.parse() {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!(
+                "GOOSE_RUN_SERVE_ACP_PORT={port:?} is not a valid port; ACP server not started"
+            );
+            return;
+        }
+    };
+
+    let session_manager = Arc::clone(&agent.config.session_manager);
+    let agent_config = AgentConfig::new(
+        session_manager,
+        Arc::clone(&agent.config.permission_manager),
+        None,
+        Config::global().get_goose_mode().unwrap_or_default(),
+        false,
+        GoosePlatform::GooseCli,
+    );
+    let manager = match AgentManager::new(agent_config, None).await {
+        Ok(m) => Arc::new(m),
+        Err(e) => {
+            eprintln!("Failed to build AgentManager for run-side ACP server: {e}");
+            return;
+        }
+    };
+    manager
+        .insert_existing_agent(session_id.to_string(), Arc::clone(&agent))
+        .await;
+
+    let server = Arc::new(AcpServer::new(AcpServerFactoryConfig {
+        builtins: AcpBuiltinSelection {
+            defaults: vec!["developer".to_string()],
+            explicit: Vec::new(),
+        },
+        data_dir: Paths::data_dir(),
+        config_dir: Paths::config_dir(),
+        goose_platform: GoosePlatform::GooseCli,
+        additional_source_roots: Vec::new(),
+        session_cwd: None,
+        enable_scheduler: false,
+        agent_manager: Some(manager),
+    }));
+
+    let secret_key = std::env::var("GOOSE_SERVER__SECRET_KEY")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let require_token = secret_key.is_some();
+    let secret_key = secret_key.unwrap_or_else(|| {
+        let generated = crate::cli::generate_serve_secret_key();
+        eprintln!(
+            "run-side ACP server starting on http://127.0.0.1:{port}/acp \
+             (unauthenticated; set GOOSE_SERVER__SECRET_KEY to require a token)"
+        );
+        generated
+    });
+
+    let router =
+        goose::acp::transport::create_router(server, secret_key, require_token, Vec::new());
+
+    tokio::spawn(async move {
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("Failed to bind run-side ACP server on {addr}: {e}");
+                return;
+            }
+        };
+        eprintln!("run-side ACP server listening on http://{addr}/acp");
+        let _ = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
+    });
 }
 
 fn is_provider_unavailable_error(e: &anyhow::Error) -> bool {
@@ -1622,5 +1727,56 @@ mod tests {
         assert_eq!(truncate_with_ellipsis("hello world", 5), "hello…");
 
         assert_eq!(truncate_with_ellipsis("", 5), "");
+    }
+}
+
+#[cfg(test)]
+mod serve_acp_tests {
+    use super::*;
+    use std::time::Duration;
+
+    // The run-side ACP server is the load-bearing piece of the "run shares its
+    // agent" path. Without an LLM credential a full `goose run` exits in
+    // build_session before reaching `maybe_serve_acp_on_run`, so exercise that
+    // function directly with a bare Agent: it must open the port and answer
+    // ACP `initialize`. The session_id is fictitious but that is fine — the
+    // server starts before any session is loaded.
+    #[tokio::test]
+    async fn run_side_acp_server_opens_its_port_and_answers_initialize() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = env_lock::lock_env([
+            ("HOME", Some(dir.path().to_str().unwrap())),
+            ("GOOSE_DISABLE_KEYRING", Some("true")),
+            ("GOOSE_PATH_ROOT", Some(dir.path().to_str().unwrap())),
+            ("GOOSE_RUN_SERVE_ACP_PORT", Some("3357")),
+        ]);
+
+        maybe_serve_acp_on_run(Arc::new(Agent::new()), "proof-session-id").await;
+
+        let client = reqwest::Client::new();
+        let mut up = false;
+        for _ in 0..40 {
+            if let Ok(resp) = client
+                .post("http://127.0.0.1:3357/acp")
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"protocolVersion": 1, "clientCapabilities": {}}
+                }))
+                .send()
+                .await
+            {
+                if resp.status().is_success() {
+                    up = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+
+        assert!(
+            up,
+            "run-side ACP server never answered initialize on :3357 — the run/serve share-an-agent \
+             seam is not wired"
+        );
     }
 }

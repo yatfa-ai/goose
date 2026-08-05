@@ -253,7 +253,7 @@ impl HistoryManager {
 }
 
 pub struct CliSession {
-    agent: Agent,
+    agent: Arc<Agent>,
     messages: Conversation,
     session_id: String,
     completion_cache: Arc<std::sync::RwLock<CompletionCache>>,
@@ -351,7 +351,7 @@ fn planner_classification_text(response: &Message) -> Result<String> {
 impl CliSession {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
-        agent: Agent,
+        agent: Arc<Agent>,
         session_id: String,
         debug: bool,
         scheduled_job_id: Option<String>,
