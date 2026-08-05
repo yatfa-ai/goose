@@ -10,8 +10,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const SESSION_LIST_PAGE_SIZE: usize = 50;
-const ACP_SESSION_LIST_TYPES: [SessionType; 3] =
-    [SessionType::User, SessionType::Scheduled, SessionType::Acp];
+// yatfa fork: Terminal included so a `goose run --interactive` session is
+// visible to session/list. The bridge's ACP transport re-attaches to the SAME
+// Arc<Agent> the TUI is driving by finding the Terminal session here and
+// session/load-ing it; without Terminal in this set the list is empty and the
+// bridge can never reach the live agent.
+const ACP_SESSION_LIST_TYPES: [SessionType; 4] =
+    [SessionType::User, SessionType::Scheduled, SessionType::Acp, SessionType::Terminal];
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SessionListCursorToken {
