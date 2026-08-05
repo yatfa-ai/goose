@@ -1,6 +1,7 @@
 use crate::acp::server::{
     AcpBuiltinSelection, AcpProviderFactory, GooseAcpAgent, GooseAcpAgentOptions,
 };
+use crate::acp::AcpTurnTap;
 use crate::agents::GoosePlatform;
 use crate::scheduler_trait::SchedulerTrait;
 use crate::session::SessionManager;
@@ -21,6 +22,11 @@ pub struct AcpServerFactoryConfig {
     /// external agent owner (an interactive `goose run` session) so ACP
     /// `session/load` resolves to the agent that session is already driving.
     pub agent_manager: Option<Arc<crate::execution::manager::AgentManager>>,
+    /// When set by an interactive `goose run` that opted into
+    /// `GOOSE_RUN_SERVE_ACP_PORT`, every turn the ACP handler processes is
+    /// duplicated onto this channel so the owning TUI can render it. `None`
+    /// for plain `goose serve` — behavior is identical to upstream.
+    pub event_tap: Option<AcpTurnTap>,
 }
 
 pub struct AcpServer {
@@ -100,6 +106,7 @@ impl AcpServer {
             additional_source_roots: self.config.additional_source_roots.clone(),
             scheduler,
             agent_manager: self.config.agent_manager.clone(),
+            event_tap: self.config.event_tap.clone(),
         })
         .await?;
         info!("Created new ACP agent");
@@ -121,6 +128,7 @@ mod tests {
             additional_source_roots: Vec::new(),
             enable_scheduler,
             agent_manager: None,
+            event_tap: None,
         })
     }
 

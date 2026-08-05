@@ -1439,6 +1439,7 @@ async fn handle_serve_command(args: ServeCommandArgs) -> Result<()> {
         additional_source_roots,
         enable_scheduler,
         agent_manager: None,
+        event_tap: None,
     }));
     let env_secret = std::env::var(GOOSE_SERVER_SECRET_KEY_ENV)
         .ok()
