@@ -7852,9 +7852,9 @@ dependencies = [
 
 [[package]]
 name = "pctx_code_execution_runtime"
-version = "0.2.0"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8b66a19b684e077ab0bc39b10922cf76e1685ff6a65198fe0bc4004c4be314f"
+checksum = "8e01051b22c295cb8f086eea10bcec6eec80ce730fed65124c9bdb589cf2aead"
 dependencies = [
  "anyhow",
  "deno_core",
@@ -7872,9 +7872,9 @@ dependencies = [
 
 [[package]]
 name = "pctx_code_mode"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f55b3476b133078b55bc808aad1ff880428bf3de3127415ec33ceab50ef230d9"
+checksum = "e8fdd1f9347e088aed901765f30a71e0497f00a870700699d49958446505ac43"
 dependencies = [
  "futures",
  "pctx_codegen",
@@ -7892,9 +7892,9 @@ dependencies = [
 
 [[package]]
 name = "pctx_codegen"
-version = "0.3.1"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a56b53c02b41420f6bd3baa7046a5a7509a38114fffa52f737f44c9044eac646"
+checksum = "9f3311888d45e8f353bc2be9dfd5e1c9a0fb3ed8852b9a4c42b2d1bcbf1d9c63"
 dependencies = [
  "biome_formatter",
  "biome_js_formatter",
@@ -7950,9 +7950,9 @@ dependencies = [
 
 [[package]]
 name = "pctx_executor"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "459b68c42775a94e0e160537e644f9a8d4ab7041fa724976b08382eb386836e1"
+checksum = "0e0d802923b9f2426c95664036639ca2a979816ad1f58d086f970f68dadb5643"
 dependencies = [
  "deno_core",
  "deno_resolver",
@@ -7974,9 +7974,9 @@ dependencies = [
 
 [[package]]
 name = "pctx_registry"
-version = "0.1.2"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "251c06ac888c315c7e23d210e4e9ffa88d5dc08225c0d8de96f1263837d72896"
+checksum = "12170e60727861d257a5bd70646ab81a97c4d917046fc38ff90a58543d6b688c"
 dependencies = [
  "deno_error",
  "pctx_config",
