@@ -26,6 +26,7 @@ fn test_acp_router(dir: &tempfile::TempDir) -> Router {
         session_cwd: None,
         enable_scheduler: false,
         agent_manager: None,
+        event_tap: None,
     }));
     create_acp_router(server)
 }
@@ -40,6 +41,7 @@ fn test_authenticated_acp_router(dir: &tempfile::TempDir) -> Router {
         session_cwd: None,
         enable_scheduler: false,
         agent_manager: None,
+        event_tap: None,
     }));
     create_router(server, SECRET.to_string(), true, Vec::new())
 }
@@ -58,6 +60,7 @@ fn test_router_with_origins(
         session_cwd: None,
         enable_scheduler: false,
         agent_manager: None,
+        event_tap: None,
     }));
     create_router(
         server,

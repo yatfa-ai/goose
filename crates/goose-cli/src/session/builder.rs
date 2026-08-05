@@ -897,7 +897,7 @@ pub async fn build_session(session_config: SessionBuilderConfig) -> CliSession {
 
     let debug_mode = session_config.debug || config.get_param("GOOSE_DEBUG").unwrap_or(false);
 
-    let session = CliSession::new(
+    let mut session = CliSession::new(
         Arc::clone(&agent_ptr),
         session_id.clone(),
         debug_mode,
@@ -921,7 +921,8 @@ pub async fn build_session(session_config: SessionBuilderConfig) -> CliSession {
         );
     }
 
-    maybe_serve_acp_on_run(Arc::clone(&agent_ptr), &session_id).await;
+    let acp_turn_rx = maybe_serve_acp_on_run(Arc::clone(&agent_ptr), &session_id).await;
+    session.set_acp_turn_rx(acp_turn_rx);
 
     session
 }
@@ -936,7 +937,10 @@ pub async fn build_session(session_config: SessionBuilderConfig) -> CliSession {
 /// freshly-built twin. Loopback-only and unauthenticated by default — the
 /// bridge→serve link is inside one container — but `GOOSE_SERVER__SECRET_KEY`
 /// is honored when set.
-async fn maybe_serve_acp_on_run(agent: Arc<Agent>, session_id: &str) {
+async fn maybe_serve_acp_on_run(
+    agent: Arc<Agent>,
+    session_id: &str,
+) -> Option<tokio::sync::mpsc::Receiver<goose::acp::AcpTurnEvent>> {
     use goose::acp::server::AcpBuiltinSelection;
     use goose::acp::server_factory::{AcpServer, AcpServerFactoryConfig};
     use goose::agents::AgentConfig;
@@ -947,7 +951,7 @@ async fn maybe_serve_acp_on_run(agent: Arc<Agent>, session_id: &str) {
 
     let port = match std::env::var("GOOSE_RUN_SERVE_ACP_PORT") {
         Ok(raw) => raw.trim().to_string(),
-        Err(_) => return,
+        Err(_) => return None,
     };
     let port: u16 = match port.parse() {
         Ok(p) => p,
@@ -955,7 +959,7 @@ async fn maybe_serve_acp_on_run(agent: Arc<Agent>, session_id: &str) {
             eprintln!(
                 "GOOSE_RUN_SERVE_ACP_PORT={port:?} is not a valid port; ACP server not started"
             );
-            return;
+            return None;
         }
     };
 
@@ -972,12 +976,18 @@ async fn maybe_serve_acp_on_run(agent: Arc<Agent>, session_id: &str) {
         Ok(m) => Arc::new(m),
         Err(e) => {
             eprintln!("Failed to build AgentManager for run-side ACP server: {e}");
-            return;
+            return None;
         }
     };
     manager
         .insert_existing_agent(session_id.to_string(), Arc::clone(&agent))
         .await;
+
+    // Live-mirror channel: the ACP handler taps every dispatcher turn onto the
+    // sender; the owning interactive TUI drains the receiver so ACP turns render
+    // in the terminal like user-typed ones instead of vanishing into the
+    // loopback WebSocket.
+    let (event_tap_tx, event_tap_rx) = tokio::sync::mpsc::channel::<goose::acp::AcpTurnEvent>(64);
 
     let server = Arc::new(AcpServer::new(AcpServerFactoryConfig {
         builtins: AcpBuiltinSelection {
@@ -991,6 +1001,7 @@ async fn maybe_serve_acp_on_run(agent: Arc<Agent>, session_id: &str) {
         session_cwd: None,
         enable_scheduler: false,
         agent_manager: Some(manager),
+        event_tap: Some(event_tap_tx),
     }));
 
     let secret_key = std::env::var("GOOSE_SERVER__SECRET_KEY")
@@ -1026,6 +1037,8 @@ async fn maybe_serve_acp_on_run(agent: Arc<Agent>, session_id: &str) {
         )
         .await;
     });
+
+    Some(event_tap_rx)
 }
 
 fn is_provider_unavailable_error(e: &anyhow::Error) -> bool {
@@ -1751,7 +1764,7 @@ mod serve_acp_tests {
             ("GOOSE_RUN_SERVE_ACP_PORT", Some("3357")),
         ]);
 
-        maybe_serve_acp_on_run(Arc::new(Agent::new()), "proof-session-id").await;
+        let _event_rx = maybe_serve_acp_on_run(Arc::new(Agent::new()), "proof-session-id").await;
 
         let client = reqwest::Client::new();
         let mut up = false;
