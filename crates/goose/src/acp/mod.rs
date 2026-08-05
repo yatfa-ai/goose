@@ -5,9 +5,12 @@ mod provider;
 mod response_builder;
 pub mod server;
 pub mod server_factory;
+pub mod turn_event;
 pub(crate) mod tool_call_notifier;
 pub(crate) mod tools;
 pub mod transport;
+
+pub use turn_event::{AcpTurnEvent, AcpTurnTap};
 
 pub use common::{map_permission_response, PermissionDecision};
 pub use goose_sdk_types::{custom_notifications, custom_requests};

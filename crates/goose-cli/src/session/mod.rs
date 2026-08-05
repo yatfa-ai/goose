@@ -202,6 +202,10 @@ pub struct CliSession {
     retry_config: Option<RetryConfig>,
     output_format: String,
     stats: bool,
+    /// Live mirror of ACP-driven turns, attached when `goose run` lifted a
+    /// run-side ACP server (`GOOSE_RUN_SERVE_ACP_PORT`). `None` for a plain
+    /// interactive run with no serve-on-run.
+    acp_turn_rx: Option<tokio::sync::mpsc::Receiver<goose::acp::AcpTurnEvent>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -319,7 +323,18 @@ impl CliSession {
             retry_config,
             output_format,
             stats,
+            acp_turn_rx: None,
         }
+    }
+
+    /// Attach the ACP turn-mirror channel drained by `run_interactive`. Called
+    /// by `build_session` after `maybe_serve_acp_on_run` opts the run into a
+    /// loopback serve; a no-op when no serve-on-run is active.
+    pub fn set_acp_turn_rx(
+        &mut self,
+        rx: Option<tokio::sync::mpsc::Receiver<goose::acp::AcpTurnEvent>>,
+    ) {
+        self.acp_turn_rx = rx;
     }
 
     pub fn session_id(&self) -> &String {
@@ -556,6 +571,29 @@ impl CliSession {
         let mut editor = self.create_editor()?;
         let history_manager = HistoryManager::new();
         history_manager.load(&mut editor);
+
+        // When this run lifted a run-side ACP server, drain the turn-mirror
+        // channel on a dedicated task and render each tick through the same
+        // markdown/spinner path as a user-typed turn. Read-only: the live reply
+        // still streams to the bridge over the loopback WebSocket; this only
+        // paints the terminal an operator may be attached to.
+        if let Some(mut acp_rx) = self.acp_turn_rx.take() {
+            let debug = self.debug;
+            tokio::spawn(async move {
+                let mut markdown_buffer = streaming_buffer::MarkdownBuffer::new();
+                let mut progress_bars = output::McpSpinners::new();
+                let mut thinking_header_shown = false;
+                while let Some(event) = acp_rx.recv().await {
+                    render_acp_turn_event(
+                        event,
+                        &mut markdown_buffer,
+                        &mut progress_bars,
+                        &mut thinking_header_shown,
+                        debug,
+                    );
+                }
+            });
+        }
 
         loop {
             self.display_context_usage().await?;
@@ -2161,6 +2199,68 @@ fn find_elicitation_request(message: &Message) -> Option<(String, String, Value)
         }
         None
     })
+}
+
+/// Render one ACP-mirror tick into the interactive terminal. Called from the
+/// run-side serve tap task so dispatcher-initiated turns read like a chat:
+/// the prompt is shown as a compact header, the reply streams through the same
+/// markdown/spinner path as a user-typed turn. Read-only — it never touches the
+/// agent or session state, so it cannot interfere with the live ACP reply that
+/// the bridge is already receiving over the loopback WebSocket.
+fn render_acp_turn_event(
+    event: goose::acp::AcpTurnEvent,
+    markdown_buffer: &mut streaming_buffer::MarkdownBuffer,
+    progress_bars: &mut output::McpSpinners,
+    thinking_header_shown: &mut bool,
+    debug: bool,
+) {
+    use goose::agents::AgentEvent;
+    match event {
+        goose::acp::AcpTurnEvent::PromptReceived { text, .. } => {
+            output::flush_markdown_buffer_current_theme(markdown_buffer);
+            *thinking_header_shown = false;
+            let trimmed = text.trim_end();
+            if !trimmed.is_empty() {
+                output::render_text("", None, false);
+                output::render_text(
+                    &format!("dispatcher ▸ {trimmed}"),
+                    Some(Color::Cyan),
+                    false,
+                );
+            }
+        }
+        goose::acp::AcpTurnEvent::StreamEvent(AgentEvent::Message(message)) => {
+            output::render_message_streaming(
+                &message,
+                markdown_buffer,
+                thinking_header_shown,
+                debug,
+            );
+        }
+        goose::acp::AcpTurnEvent::StreamEvent(AgentEvent::McpNotification((extension_id, notification))) => {
+            handle_mcp_notification(
+                &extension_id,
+                &notification,
+                progress_bars,
+                false,
+                true,
+                false,
+                debug,
+            );
+        }
+        goose::acp::AcpTurnEvent::StreamEvent(_) => {}
+        goose::acp::AcpTurnEvent::TurnDone { .. } => {
+            output::flush_markdown_buffer_current_theme(markdown_buffer);
+            let _ = progress_bars.hide();
+            output::hide_thinking();
+        }
+        goose::acp::AcpTurnEvent::TurnFailed { error, .. } => {
+            output::flush_markdown_buffer_current_theme(markdown_buffer);
+            let _ = progress_bars.hide();
+            output::hide_thinking();
+            output::render_error(&format!("ACP turn ended: {error}"));
+        }
+    }
 }
 
 /// Handle MCP notification event (logging or progress)
