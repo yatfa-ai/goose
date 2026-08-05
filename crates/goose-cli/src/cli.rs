@@ -48,7 +48,7 @@ use std::path::PathBuf;
 const GOOSE_SERVER_SECRET_KEY_ENV: &str = "GOOSE_SERVER__SECRET_KEY";
 
 #[cfg(feature = "acp-http")]
-fn generate_serve_secret_key() -> String {
+pub fn generate_serve_secret_key() -> String {
     use rand::distr::{Alphanumeric, SampleString};
 
     format!(
