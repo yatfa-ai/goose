@@ -318,6 +318,10 @@ pub struct GooseAcpAgentOptions {
     /// constructing a fresh one, so `session/load` against an id the external
     /// owner has registered returns the same `Arc<Agent>`.
     pub agent_manager: Option<Arc<AgentManager>>,
+    /// Optional live-mirror tap set by an interactive `goose run` that lifted
+    /// a run-side ACP server. When set, every turn processed by this agent is
+    /// duplicated onto the channel so the owning TUI can render it.
+    pub event_tap: Option<crate::acp::AcpTurnTap>,
 }
 
 pub struct GooseAcpAgent {
@@ -347,6 +351,8 @@ pub struct GooseAcpAgent {
     additional_source_roots: Vec<SourceRoot>,
     session_cwd: Option<PathBuf>,
     recipe_path_cache: Arc<Mutex<HashMap<String, PathBuf>>>,
+    /// See [`crate::acp::turn_event`]; `None` for plain `goose serve`.
+    event_tap: Option<crate::acp::AcpTurnTap>,
 }
 
 fn meta_string(
@@ -869,6 +875,17 @@ impl GooseAcpAgent {
         Arc::clone(&self.permission_manager)
     }
 
+    /// Duplicate a turn tick onto the run-side TUI's mirror channel, if one was
+    /// attached by `maybe_serve_acp_on_run`. Best-effort: a full channel or no
+    /// attached TUI drops the event without affecting the ACP reply path.
+    fn tap_turn_event(&self, event: crate::acp::AcpTurnEvent) {
+        if let Some(tap) = &self.event_tap {
+            if tap.try_send(event).is_err() {
+                tracing::debug!("acp turn-event tap full or closed; dropping");
+            }
+        }
+    }
+
     pub(super) fn supports_goose_custom_notifications(&self) -> bool {
         self.client_supports_goose_custom_notifications
             .get()
@@ -1020,6 +1037,7 @@ impl GooseAcpAgent {
             additional_source_roots: options.additional_source_roots,
             session_cwd: options.session_cwd,
             recipe_path_cache: Arc::new(Mutex::new(HashMap::new())),
+            event_tap: options.event_tap,
         })
     }
 
@@ -2169,6 +2187,12 @@ impl GooseAcpAgent {
                 break;
             }
 
+            if let Ok(tick) = &event {
+                self.tap_turn_event(crate::acp::AcpTurnEvent::StreamEvent(Box::new(
+                    tick.clone(),
+                )));
+            }
+
             match event {
                 Ok(crate::agents::AgentEvent::Message(mut message)) => {
                     update_output_token_limit_reached(&mut output_token_limit_reached, &message);
@@ -2342,6 +2366,20 @@ impl GooseAcpAgent {
         }
 
         let user_message = Self::convert_acp_prompt_to_message(&args.prompt);
+        let prompt_text: String = args
+            .prompt
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<&str>>()
+            .join("\n");
+        self.tap_turn_event(crate::acp::AcpTurnEvent::PromptReceived {
+            session_id: session_id.clone(),
+            text: prompt_text,
+        });
+
         let use_state_machine = use_state_machine_from_meta(args.meta.as_ref());
         let session_config = SessionConfig {
             id: session_id.clone(),
@@ -2377,6 +2415,26 @@ impl GooseAcpAgent {
                 stream,
             )
             .await;
+
+        match &stream_result {
+            Ok(outcome) if !outcome.was_cancelled => {
+                self.tap_turn_event(crate::acp::AcpTurnEvent::TurnDone {
+                    session_id: session_id.clone(),
+                });
+            }
+            Ok(_) => {
+                self.tap_turn_event(crate::acp::AcpTurnEvent::TurnFailed {
+                    session_id: session_id.clone(),
+                    error: "cancelled".to_string(),
+                });
+            }
+            Err(error) => {
+                self.tap_turn_event(crate::acp::AcpTurnEvent::TurnFailed {
+                    session_id: session_id.clone(),
+                    error: error.to_string(),
+                });
+            }
+        }
         self.clear_active_run(&session_id, &run_id).await;
         Self::send_active_run_update(cx, &args.session_id, None)?;
         let outcome = stream_result?;
@@ -2747,6 +2805,7 @@ pub async fn run(builtins: Vec<String>, enable_scheduler: bool) -> Result<()> {
             session_cwd: None,
             enable_scheduler,
             agent_manager: None,
+            event_tap: None,
         },
     );
     let agent = server.create_agent().await?;
@@ -3697,6 +3756,7 @@ print(\"hello, world\")
             active_runs,
             live_voice,
             agent_manager: None,
+            event_tap: None,
         })
         .await
         .unwrap();
@@ -3832,6 +3892,7 @@ print(\"hello, world\")
                 active_runs,
                 live_voice,
                 agent_manager: None,
+                event_tap: None,
             })
             .await
             .unwrap(),

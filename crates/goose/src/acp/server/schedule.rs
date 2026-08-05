@@ -391,6 +391,7 @@ mod tests {
             session_cwd: None,
             enable_scheduler: true,
             agent_manager: None,
+            event_tap: None,
         });
         let agent = server.create_agent().await.unwrap();
 
@@ -429,6 +430,7 @@ mod tests {
             session_cwd: None,
             enable_scheduler: false,
             agent_manager: None,
+            event_tap: None,
         });
         let agent = server.create_agent().await.unwrap();
 
