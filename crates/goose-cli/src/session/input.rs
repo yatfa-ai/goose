@@ -65,7 +65,10 @@ impl CtrlCHandler {
 }
 
 impl rustyline::ConditionalEventHandler for CtrlCHandler {
-    /// Handle Ctrl+C to clear the line if text is entered, otherwise check if we should exit.
+    /// Handle Ctrl+C to clear the line if text is entered; otherwise, when
+    /// exit-on-interrupt is enabled, arm or confirm the "press again to exit"
+    /// flow. With exit disabled (`GOOSE_CLI_EXIT_ON_INTERRUPT=false`) an empty
+    /// line is a no-op, so a stray second interrupt can never kill the session.
     fn handle(
         &self,
         _event: &rustyline::Event,
@@ -73,23 +76,10 @@ impl rustyline::ConditionalEventHandler for CtrlCHandler {
         _positive: bool,
         ctx: &rustyline::EventContext,
     ) -> Option<rustyline::Cmd> {
-        if !ctx.line().is_empty() {
-            // Clear the line if there's text
-            let mut cache = self.completion_cache.write().unwrap();
-            cache.hint_status = HintStatus::Default;
-            Some(rustyline::Cmd::Kill(rustyline::Movement::WholeBuffer))
-        } else {
-            let mut cache = self.completion_cache.write().unwrap();
-
-            if cache.hint_status == HintStatus::MaybeExit {
-                return Some(rustyline::Cmd::Interrupt);
-            }
-
-            cache.hint_status = HintStatus::MaybeExit;
-            drop(cache);
-
-            Some(rustyline::Cmd::Repaint)
-        }
+        let mut cache = self.completion_cache.write().unwrap();
+        let (cmd, hint_status) = ctrl_c_outcome(ctx.line(), cache.hint_status, exit_on_interrupt());
+        cache.hint_status = hint_status;
+        cmd
     }
 }
 
@@ -106,6 +96,47 @@ pub fn get_newline_key() -> char {
         .map(|c| c.to_ascii_lowercase())
         .filter(|c| !matches!(c, 'm' | 'c'))
         .unwrap_or('j')
+}
+
+/// Whether Ctrl+C can exit the session. Defaults to `true` — the "press again
+/// to exit" behaviour — so this changes nothing unless an operator opts out.
+/// Set `GOOSE_CLI_EXIT_ON_INTERRUPT=false` for environments where a stray
+/// second interrupt is costly: an embedded/automated client with nobody to
+/// read the "press again" hint, or an interactive operator who cancels
+/// in-flight turns and hits Ctrl+C twice out of habit. Exit is then reachable
+/// only via `/exit`. Read through the same config layer as
+/// `GOOSE_CLI_NEWLINE_KEY`, so it accepts the env var or a `config.yaml` entry.
+fn exit_on_interrupt() -> bool {
+    Config::global()
+        .get_param::<bool>("GOOSE_CLI_EXIT_ON_INTERRUPT")
+        .unwrap_or(true)
+}
+
+/// What Ctrl+C does, as a pure decision over the editor state so it is
+/// unit-testable without a rustyline `EventContext` or the global config.
+/// Returns the command to run and the `HintStatus` to write back:
+///
+/// - line has text: clear it (and reset any armed exit);
+/// - empty line, exit enabled: first press arms the hint, second press exits;
+/// - empty line, exit disabled: no-op — Ctrl+C never exits.
+fn ctrl_c_outcome(
+    line: &str,
+    hint_status: HintStatus,
+    exit_on_interrupt: bool,
+) -> (Option<rustyline::Cmd>, HintStatus) {
+    if !line.is_empty() {
+        return (
+            Some(rustyline::Cmd::Kill(rustyline::Movement::WholeBuffer)),
+            HintStatus::Default,
+        );
+    }
+    if !exit_on_interrupt {
+        return (None, HintStatus::Default);
+    }
+    match hint_status {
+        HintStatus::MaybeExit => (Some(rustyline::Cmd::Interrupt), HintStatus::MaybeExit),
+        _ => (Some(rustyline::Cmd::Repaint), HintStatus::MaybeExit),
+    }
 }
 
 /// Determine whether the editor should be used for every prompt.
@@ -460,6 +491,11 @@ fn parse_plan_command(input: String) -> Option<InputResult> {
 fn help_text() -> String {
     let modes = GooseMode::VARIANTS.join(", ");
     let newline_key = get_newline_key().to_ascii_uppercase();
+    let ctrl_c_help = if exit_on_interrupt() {
+        "Ctrl+C - Clear current line if text is entered, otherwise exit the session (press twice to confirm)"
+    } else {
+        "Ctrl+C - Clear current line if text is entered (exit disabled via GOOSE_CLI_EXIT_ON_INTERRUPT; use /exit)"
+    };
     let additional_builtin_help = additional_builtin_help();
     let additional_builtin_help = if additional_builtin_help.is_empty() {
         String::new()
@@ -500,7 +536,7 @@ fn help_text() -> String {
 Navigation:
 Enter - Send message
 Ctrl+{newline_key} - Add a newline (configurable via GOOSE_CLI_NEWLINE_KEY)
-Ctrl+C - Clear current line if text is entered, otherwise exit the session
+{ctrl_c_help}
 Up/Down arrows - Navigate through command history"
     )
 }
@@ -549,6 +585,47 @@ fn print_editor_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ctrl_c_clears_line_when_text_present() {
+        let (cmd, status) = ctrl_c_outcome("some text", HintStatus::Default, true);
+        assert!(matches!(cmd, Some(rustyline::Cmd::Kill(_))));
+        assert_eq!(status, HintStatus::Default);
+    }
+
+    #[test]
+    fn ctrl_c_arms_exit_on_first_press_when_enabled() {
+        let (cmd, status) = ctrl_c_outcome("", HintStatus::Default, true);
+        assert!(matches!(cmd, Some(rustyline::Cmd::Repaint)));
+        assert_eq!(status, HintStatus::MaybeExit);
+    }
+
+    #[test]
+    fn ctrl_c_exits_on_second_press_when_enabled() {
+        let (cmd, status) = ctrl_c_outcome("", HintStatus::MaybeExit, true);
+        assert!(matches!(cmd, Some(rustyline::Cmd::Interrupt)));
+        assert_eq!(status, HintStatus::MaybeExit);
+    }
+
+    #[test]
+    fn ctrl_c_never_exits_when_exit_disabled() {
+        // First press on an empty line is a no-op.
+        let (cmd, status) = ctrl_c_outcome("", HintStatus::Default, false);
+        assert!(cmd.is_none());
+        assert_eq!(status, HintStatus::Default);
+
+        // Even with MaybeExit already armed (e.g. the flag flipped mid-session),
+        // an empty line does not exit.
+        let (cmd, _status) = ctrl_c_outcome("", HintStatus::MaybeExit, false);
+        assert!(cmd.is_none());
+    }
+
+    #[test]
+    fn ctrl_c_still_clears_line_when_exit_disabled() {
+        let (cmd, status) = ctrl_c_outcome("text", HintStatus::MaybeExit, false);
+        assert!(matches!(cmd, Some(rustyline::Cmd::Kill(_))));
+        assert_eq!(status, HintStatus::Default);
+    }
 
     #[test]
     fn test_handle_slash_command() {
