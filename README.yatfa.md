@@ -1,6 +1,9 @@
 # yatfa fork of goose
 
-Private fork of [aaif-goose/goose](https://github.com/aaif-goose/goose) at tag `v1.45.0`.
+Fork of [aaif-goose/goose](https://github.com/aaif-goose/goose), rebased onto upstream `main`.
+
+For the shape we're aiming at and which parts of it we think belong in goose rather than here, see
+[ACP-ATTACH.yatfa.md](ACP-ATTACH.yatfa.md). Upstream discussion: aaif-goose/goose#11000.
 
 ## Why this fork exists
 
