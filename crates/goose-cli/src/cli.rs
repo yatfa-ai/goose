@@ -250,7 +250,10 @@ pub struct InputOptions {
         long = "system",
         value_name = "TEXT",
         help = "Additional system prompt to customize agent behavior",
-        long_help = "Provide additional system instructions to customize the agent's behavior",
+        long_help = "Provide additional system instructions to customize the agent's behavior. \
+                     These are APPENDED to goose's built-in agent prompt under an \
+                     \"# Additional Instructions:\" heading. To REPLACE that prompt with your \
+                     own instead, set GOOSE_SYSTEM_PROMPT_FILE_PATH to a file containing it.",
         conflicts_with = "recipe"
     )]
     pub system: Option<String>,
