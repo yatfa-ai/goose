@@ -152,13 +152,30 @@ impl<'a> SystemPromptBuilder<'a, PromptManager> {
 
         let base_prompt = if let Some(override_prompt) = &self.manager.system_prompt_override {
             let sanitized_override_prompt = sanitize_unicode_tags(override_prompt);
-            prompt_template::render_string(&sanitized_override_prompt, &context)
+            // An override is a REPLACEMENT, so a render failure must not fall
+            // through to goose's own text: a caller that replaced the prompt
+            // would silently get the one line below instead of the prompt it
+            // set, with no error anywhere. Measured against a real run: an
+            // override containing an unparseable `{% ... %}` produced a system
+            // prompt of exactly "You are a general-purpose AI agent called
+            // goose, created by Block" and the caller's prompt was gone.
+            // Falling back to the override text verbatim keeps the replacement
+            // honest — worst case the template markers reach the model as
+            // literal characters.
+            prompt_template::render_string(&sanitized_override_prompt, &context).unwrap_or_else(
+                |err| {
+                    tracing::warn!(
+                        error = %err,
+                        "system prompt override is not a valid template; using it verbatim"
+                    );
+                    sanitized_override_prompt
+                },
+            )
         } else {
-            prompt_template::render_template("system.md", &context)
-        }
-        .unwrap_or_else(|_| {
-            "You are a general-purpose AI agent called goose, created by Block".to_string()
-        });
+            prompt_template::render_template("system.md", &context).unwrap_or_else(|_| {
+                "You are a general-purpose AI agent called goose, created by Block".to_string()
+            })
+        };
 
         let mut system_prompt_extras = self.manager.system_prompt_extras.clone();
         system_prompt_extras.extend(self.prompt_extras);
@@ -448,6 +465,61 @@ mod tests {
 
         manager.clear_system_prompt_override();
         assert!(!manager.builder().build().contains("Replacement prompt"));
+    }
+
+    /// An override that is not a valid template must still REPLACE the built-in
+    /// prompt. The failure this pins is silent: the shared `unwrap_or_else` used
+    /// to hand back goose's identity line for BOTH branches, so a caller whose
+    /// prompt happened to contain `{%` lost it entirely and got a one-line goose
+    /// prompt with no error. Verified on a live run before the fix.
+    #[test]
+    fn test_override_render_failure_keeps_the_override_not_goose_text() {
+        let mut manager = PromptManager::new();
+        manager.set_system_prompt_override(
+            "REPLACEMENT SENTINEL\n\nUse the template {% if broken".to_string(),
+        );
+
+        let result = manager.builder().build();
+
+        assert!(
+            result.contains("REPLACEMENT SENTINEL"),
+            "an unrenderable override must survive verbatim, got: {result}"
+        );
+        assert!(
+            !result.contains("general-purpose AI agent called goose"),
+            "an override must never fall back to goose's own prompt, got: {result}"
+        );
+    }
+
+    /// The whole point of an override for an embedder: NONE of `system.md`
+    /// reaches the model. Pins the absence of every block that template renders
+    /// (identity, extensions prose, response guidelines) even when extensions
+    /// are loaded — those interpolate INTO system.md, so an override drops them
+    /// with it, and the tool surface travels in the request's `tools` field
+    /// instead.
+    #[test]
+    fn test_override_replaces_every_block_of_the_builtin_prompt() {
+        let mut manager = PromptManager::new();
+        manager.set_system_prompt_override("ROLE PROMPT ONLY".to_string());
+
+        let result = manager
+            .builder()
+            .with_goose_mode(GooseMode::Auto)
+            .with_extension(ExtensionInfo::new("test", "how to use this", true))
+            .build();
+
+        assert_eq!(result, "ROLE PROMPT ONLY");
+        for leaked in [
+            "general-purpose AI agent called goose",
+            "# Extensions",
+            "# Response Guidelines",
+            "No extensions are defined",
+        ] {
+            assert!(
+                !result.contains(leaked),
+                "override leaked built-in prompt block {leaked:?}: {result}"
+            );
+        }
     }
 
     #[test]

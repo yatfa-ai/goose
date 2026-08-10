@@ -679,6 +679,30 @@ async fn resolve_and_load_extensions(
     load_extensions(agent, extensions_to_load, session_id).await
 }
 
+/// Resolve the system-prompt REPLACEMENT, if one is configured.
+///
+/// `GOOSE_SYSTEM_PROMPT_FILE_PATH` is the embedder's entry point to
+/// `Agent::override_system_prompt`, which swaps out `system.md` wholesale
+/// rather than appending to it — the difference from `--system`, which lands in
+/// `system_prompt_extras` and is appended under "# Additional Instructions:".
+/// Both are honoured when both are set; an embedder that wants ONLY its own
+/// prompt must pass just this one.
+///
+/// A configured-but-unreadable path is fatal on purpose: silently continuing
+/// would boot the agent on goose's built-in prompt while the operator believes
+/// it was replaced.
+fn system_prompt_override(config: &Config) -> Option<String> {
+    let path: String = config.get_param("GOOSE_SYSTEM_PROMPT_FILE_PATH").ok()?;
+
+    Some(std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        output::render_error(&format!(
+            "Failed to read system prompt file '{}': {}",
+            path, e
+        ));
+        process::exit(1);
+    }))
+}
+
 async fn configure_session_prompts(
     session: &CliSession,
     config: &Config,
@@ -696,15 +720,7 @@ async fn configure_session_prompts(
             .await;
     }
 
-    let system_prompt_file: Option<String> = config.get_param("GOOSE_SYSTEM_PROMPT_FILE_PATH").ok();
-    if let Some(ref path) = system_prompt_file {
-        let override_prompt = std::fs::read_to_string(path).unwrap_or_else(|e| {
-            output::render_error(&format!(
-                "Failed to read system prompt file '{}': {}",
-                path, e
-            ));
-            process::exit(1);
-        });
+    if let Some(override_prompt) = system_prompt_override(config) {
         session.agent.override_system_prompt(override_prompt).await;
     }
 }
@@ -1740,6 +1756,76 @@ mod tests {
         assert_eq!(truncate_with_ellipsis("hello world", 5), "hello…");
 
         assert_eq!(truncate_with_ellipsis("", 5), "");
+    }
+}
+
+#[cfg(test)]
+mod system_prompt_override_tests {
+    use super::*;
+    use goose::agents::prompt_manager::PromptManager;
+    use std::io::Write;
+
+    /// The wiring proof for the system-prompt REPLACEMENT path, end to end:
+    /// `GOOSE_SYSTEM_PROMPT_FILE_PATH` -> `system_prompt_override` -> the
+    /// override branch of `build`.
+    ///
+    /// The last assertion is the one that matters to an embedder: the built
+    /// prompt is EXACTLY the file, so none of `system.md` — goose's identity,
+    /// its extensions prose, its response guidelines — reaches the model.
+    #[test]
+    fn configured_prompt_file_becomes_the_whole_system_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("role-prompt.md");
+        let role_prompt = "You are the ACME WORKER.\n\nYou must NOT create tickets.";
+        write!(std::fs::File::create(&path).unwrap(), "{role_prompt}").unwrap();
+
+        let _guard = env_lock::lock_env([
+            ("HOME", Some(dir.path().to_str().unwrap())),
+            ("GOOSE_PATH_ROOT", Some(dir.path().to_str().unwrap())),
+            ("GOOSE_DISABLE_KEYRING", Some("true")),
+            ("GOOSE_MODE", Some("auto")),
+            (
+                "GOOSE_SYSTEM_PROMPT_FILE_PATH",
+                Some(path.to_str().unwrap()),
+            ),
+        ]);
+
+        let resolved = system_prompt_override(Config::global())
+            .expect("GOOSE_SYSTEM_PROMPT_FILE_PATH must resolve to the file's contents");
+        assert_eq!(resolved, role_prompt);
+
+        let mut manager = PromptManager::new();
+        manager.set_system_prompt_override(resolved);
+        let built = manager.builder().build();
+
+        assert_eq!(built, role_prompt);
+        assert!(
+            !built.contains("general-purpose AI agent called goose"),
+            "the built-in prompt leaked through the override: {built}"
+        );
+    }
+
+    /// With no key configured, nothing is overridden — `--system` and the
+    /// built-in prompt keep behaving exactly as before for every caller that
+    /// does not opt in.
+    #[test]
+    fn no_configured_file_leaves_the_builtin_prompt_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = env_lock::lock_env([
+            ("HOME", Some(dir.path().to_str().unwrap())),
+            ("GOOSE_PATH_ROOT", Some(dir.path().to_str().unwrap())),
+            ("GOOSE_DISABLE_KEYRING", Some("true")),
+            ("GOOSE_MODE", Some("auto")),
+            ("GOOSE_SYSTEM_PROMPT_FILE_PATH", None),
+        ]);
+
+        assert!(system_prompt_override(Config::global()).is_none());
+
+        let built = PromptManager::new().builder().build();
+        assert!(
+            built.contains("general-purpose AI agent called goose"),
+            "without an override the built-in prompt must still render: {built}"
+        );
     }
 }
 
