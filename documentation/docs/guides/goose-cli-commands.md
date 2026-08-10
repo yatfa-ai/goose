@@ -408,7 +408,7 @@ Execute commands from an instruction file or stdin. Check out the [full guide](/
 **Input Options:**
 - **`-i, --instructions <FILE>`**: Path to instruction file containing commands. Use `-` for stdin
 - **`-t, --text <TEXT>`**: Input text to provide to goose directly
-- **`--system <TEXT>`**: Provide additional system instructions to customize the agent's behavior
+- **`--system <TEXT>`**: Provide additional system instructions to customize the agent's behavior. These are APPENDED to goose's built-in agent prompt under a "# Additional Instructions:" heading — to REPLACE that prompt instead, set [`GOOSE_SYSTEM_PROMPT_FILE_PATH`](/docs/guides/environment-variables#session-management)
 - **`--recipe <RECIPE_FILE_NAME> <OPTIONS>`**: Load a custom recipe in current session
 - **`--params <KEY=VALUE>`**: Key-value parameters to pass to the recipe file. Can be specified multiple times
 - **`--sub-recipe <RECIPE>`**: Specify sub-recipes to include alongside the main recipe. Can be specified multiple times
