@@ -781,3 +781,245 @@ fn test_shell_terminal_false() {
 fn test_shell_terminal_true() {
     run_test(async { run_shell_terminal_true::<AcpServerConnection>().await });
 }
+
+// ---------------------------------------------------------------------------
+// Pane-mirror tap (fork-only; see ACP-ATTACH.yatfa.md "4. Rendering another
+// client's turn in the pane").
+//
+// `on_prompt` duplicates each turn onto `event_tap` so an interactive `goose
+// run` renders dispatcher-driven ACP turns instead of showing a frozen pane to
+// an operator attached over tmux. Every other ACP test leaves the tap `None`,
+// so these are the only tests in which `tap_turn_event`'s enabled branch runs.
+// ---------------------------------------------------------------------------
+
+use common_tests::fixtures::PermissionDecision;
+use goose::acp::AcpTurnEvent;
+
+/// Mirrors the private `TURN_CONTEXT_OPEN` in `acp_common_tests`: the provider
+/// sees the turn-context suffix, while the tap sees the raw prompt blocks.
+const TAP_TURN_CONTEXT_OPEN: &str = r#"\n<turn-context>"#;
+
+fn drain_tap(rx: &mut tokio::sync::mpsc::Receiver<AcpTurnEvent>) -> Vec<AcpTurnEvent> {
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    events
+}
+
+/// Connection whose provider answers the one `what is 1+1` exchange with "2".
+async fn tap_connection(event_tap: tokio::sync::mpsc::Sender<AcpTurnEvent>) -> AcpServerConnection {
+    let expected_session_id = <AcpServerConnection as Connection>::expected_session_id();
+    let openai = OpenAiFixture::new(
+        vec![(
+            format!("what is 1+1{TAP_TURN_CONTEXT_OPEN}"),
+            include_str!("acp_test_data/openai_basic.txt"),
+        )],
+        expected_session_id,
+    )
+    .await;
+    <AcpServerConnection as Connection>::new(
+        TestConnectionConfig {
+            event_tap: Some(event_tap),
+            ..Default::default()
+        },
+        openai,
+    )
+    .await
+}
+
+/// Success criterion 2 — the observed mirror of one dispatcher turn is
+/// `PromptReceived` (carrying the prompt text) -> >=1 `StreamEvent` ->
+/// `TurnDone`. Covers three of the four `tap_turn_event` call sites.
+#[test]
+fn test_prompt_taps_turn_events_in_order() {
+    run_test(async {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AcpTurnEvent>(256);
+        let mut conn = tap_connection(tx).await;
+        let mut data = conn.new_session().await.unwrap();
+
+        let output = data
+            .session
+            .prompt("what is 1+1", PermissionDecision::Cancel)
+            .await
+            .unwrap();
+        assert_eq!(output.text, "2");
+
+        let events = drain_tap(&mut rx);
+        assert!(
+            events.len() >= 3,
+            "expected PromptReceived + >=1 StreamEvent + TurnDone, got {events:?}"
+        );
+
+        let turn_session_id = match &events[0] {
+            AcpTurnEvent::PromptReceived { session_id, text } => {
+                assert_eq!(
+                    text, "what is 1+1",
+                    "PromptReceived must carry the dispatcher's prompt text so the TUI can \
+                     render the user-side bubble of the turn"
+                );
+                session_id.clone()
+            }
+            other => panic!("first tapped event must be PromptReceived, got {other:?}"),
+        };
+
+        // The tap lives inside the reply-stream loop, so a real turn mirrors at
+        // least one tick. Hoisting it out of the loop drops this to zero.
+        let stream_ticks = events
+            .iter()
+            .filter(|event| matches!(event, AcpTurnEvent::StreamEvent(_)))
+            .count();
+        assert!(
+            stream_ticks >= 1,
+            "expected >=1 StreamEvent tapped from the reply stream, got {events:?}"
+        );
+
+        match events.last().expect("non-empty") {
+            AcpTurnEvent::TurnDone { session_id } => assert_eq!(
+                session_id, &turn_session_id,
+                "TurnDone must close the same turn PromptReceived opened"
+            ),
+            other => panic!("last tapped event must be TurnDone, got {other:?}"),
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AcpTurnEvent::TurnFailed { .. })),
+            "a turn that completed normally must not tap TurnFailed: {events:?}"
+        );
+    });
+}
+
+/// Success criterion 3 — the failure path taps `TurnFailed`, not `TurnDone`.
+/// A 402 from the provider becomes `ProviderError::CreditsExhausted`, which the
+/// agent emits as a system notification and `on_prompt` recognises as a prompt
+/// error — so the turn ends on the `stream_error` branch with no timing race.
+#[test]
+fn test_prompt_error_taps_turn_failed_not_turn_done() {
+    run_test(async {
+        let openai = OpenAiFixture::failing_with_status(402).await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AcpTurnEvent>(256);
+        let mut conn = <AcpServerConnection as Connection>::new(
+            TestConnectionConfig {
+                event_tap: Some(tx),
+                ..Default::default()
+            },
+            openai,
+        )
+        .await;
+        let mut data = conn.new_session().await.unwrap();
+
+        data.session
+            .prompt("what is 1+1", PermissionDecision::Cancel)
+            .await
+            .expect_err("a turn whose provider is out of credits must fail");
+
+        let events = drain_tap(&mut rx);
+        assert!(
+            matches!(events.first(), Some(AcpTurnEvent::PromptReceived { .. })),
+            "the turn should still open with PromptReceived, got {events:?}"
+        );
+        let failure = events
+            .iter()
+            .find_map(|event| match event {
+                AcpTurnEvent::TurnFailed { error, .. } => Some(error),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("a failed turn must tap TurnFailed, got {events:?}"));
+        assert!(
+            !failure.is_empty(),
+            "TurnFailed must carry a non-empty reason for the pane to render"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AcpTurnEvent::TurnDone { .. })),
+            "a failed turn must not tap TurnDone: {events:?}"
+        );
+    });
+}
+
+/// Success criterion 4 — the load-bearing contract at `tap_turn_event`: "a full
+/// channel ... drops the event without affecting the ACP reply path". The tap
+/// fires on *every* reply tick into a channel bounded at 64, so a full channel
+/// is an ordinary operating condition. If `try_send` ever became `send().await`,
+/// the dispatcher's primary control path would deadlock here.
+#[test]
+fn test_full_tap_channel_drops_events_without_blocking_reply() {
+    run_test(async {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AcpTurnEvent>(1);
+        // Pre-fill to capacity, and hold `rx` without draining so it stays full
+        // for the whole turn. Every tap during the turn must now fail to send.
+        tx.try_send(AcpTurnEvent::TurnDone {
+            session_id: "pre-filled".to_string(),
+        })
+        .expect("first send fills the buffer");
+        assert!(
+            tx.try_send(AcpTurnEvent::TurnDone {
+                session_id: "overflow".to_string(),
+            })
+            .is_err(),
+            "channel must be at capacity before the turn starts"
+        );
+
+        let mut conn = tap_connection(tx).await;
+        let mut data = conn.new_session().await.unwrap();
+
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            data.session
+                .prompt("what is 1+1", PermissionDecision::Cancel),
+        )
+        .await
+        .expect("a full tap channel must never block the ACP reply path")
+        .expect("the ACP reply must succeed even though every tap was dropped");
+        assert_eq!(
+            output.text, "2",
+            "the reply the dispatcher receives is unaffected by the dropped mirror"
+        );
+
+        // Best-effort means dropped, not queued: nothing from the turn landed
+        // behind the pre-filled event.
+        let events = drain_tap(&mut rx);
+        assert_eq!(
+            events.len(),
+            1,
+            "turn events must be discarded when the channel is full, got {events:?}"
+        );
+        assert!(
+            matches!(&events[0], AcpTurnEvent::TurnDone { session_id } if session_id == "pre-filled"),
+            "only the pre-filled event should remain, got {events:?}"
+        );
+    });
+}
+
+/// Success criterion 5 — a detached TUI (receiver dropped) is the other half of
+/// the same best-effort contract: `try_send` returns `Err(Closed)` and the
+/// event is discarded rather than unwrapped.
+#[test]
+fn test_closed_tap_receiver_does_not_affect_reply() {
+    run_test(async {
+        let (tx, rx) = tokio::sync::mpsc::channel::<AcpTurnEvent>(64);
+        drop(rx);
+        assert!(
+            tx.try_send(AcpTurnEvent::TurnDone {
+                session_id: "detached".to_string(),
+            })
+            .is_err(),
+            "dropping the receiver must close the channel before the turn starts"
+        );
+
+        let mut conn = tap_connection(tx).await;
+        let mut data = conn.new_session().await.unwrap();
+
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            data.session
+                .prompt("what is 1+1", PermissionDecision::Cancel),
+        )
+        .await
+        .expect("a closed tap channel must never block the ACP reply path")
+        .expect("the ACP reply must succeed with no TUI attached");
+        assert_eq!(output.text, "2");
+    });
+}

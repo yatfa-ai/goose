@@ -131,6 +131,7 @@ impl Connection for AcpServerConnection {
             config.provider_factory,
             &config.current_model,
             config.disable_session_naming,
+            config.event_tap,
         )
         .await;
 

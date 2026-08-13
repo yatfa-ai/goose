@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use fs_err as fs;
 use goose::acp::server::{serve, AcpProviderFactory, GooseAcpAgent, GooseAcpAgentOptions};
+use goose::acp::AcpTurnTap;
 pub use goose::acp::{map_permission_response, PermissionDecision};
 use goose::agents::GoosePlatform;
 use goose::builtin_extension::register_builtin_extensions;
@@ -293,6 +294,44 @@ impl OpenAiFixture {
         }
     }
 
+    /// Mock OpenAI endpoint whose chat/completions always fails with `status`,
+    /// for driving a provider-error turn deterministically (no timing races).
+    /// `/v1/models` still answers normally so session setup is unaffected.
+    #[allow(dead_code)]
+    pub async fn failing_with_status(status: u16) -> Self {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_string(include_str!("../acp_test_data/openai_models.json")),
+            )
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(serde_json::json!({
+                        "error": { "message": "Insufficient credits to complete this request" }
+                    })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let base_url = mock_server.uri();
+        Self {
+            _server: mock_server,
+            base_url,
+            exchanges: Vec::new(),
+            queue: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
     pub fn uri(&self) -> &str {
         &self.base_url
     }
@@ -329,6 +368,7 @@ pub async fn serve_agent_in_process(
 }
 
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 pub async fn spawn_acp_server_in_process(
     openai_base_url: &str,
     builtins: &[String],
@@ -337,6 +377,9 @@ pub async fn spawn_acp_server_in_process(
     provider_factory: Option<AcpProviderFactory>,
     current_model: &str,
     disable_session_naming: bool,
+    // Live mirror of dispatcher-driven turns. `None` — the default everywhere
+    // except the tap tests — reproduces the pre-tap fixture exactly.
+    event_tap: Option<AcpTurnTap>,
 ) -> (DuplexTransport, JoinHandle<()>, Arc<PermissionManager>) {
     fs::create_dir_all(data_root).unwrap();
     // TODO: Paths::in_state_dir is global, ignoring per-test data_root
@@ -383,7 +426,7 @@ pub async fn spawn_acp_server_in_process(
         additional_source_roots: Vec::new(),
         scheduler: Some(Arc::new(FixtureScheduler::new())),
         agent_manager: None,
-        event_tap: None,
+        event_tap,
     })
     .await
     .unwrap();
@@ -704,6 +747,9 @@ pub struct TestConnectionConfig {
     // The model the server-side provider starts with. Defaults to TEST_MODEL.
     pub current_model: String,
     pub disable_session_naming: bool,
+    /// Attach a live-mirror tap so a test can observe the `AcpTurnEvent`s the
+    /// ACP handler duplicates onto the run-side TUI. Defaults to `None`.
+    pub event_tap: Option<AcpTurnTap>,
 }
 
 impl Default for TestConnectionConfig {
@@ -720,6 +766,7 @@ impl Default for TestConnectionConfig {
             terminal: None,
             current_model: TEST_MODEL.to_string(),
             disable_session_naming: true,
+            event_tap: None,
         }
     }
 }
