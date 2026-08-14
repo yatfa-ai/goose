@@ -1,6 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -305,13 +304,13 @@ pub struct Agent {
     pub(super) retry_manager: RetryManager,
     pub(super) tool_inspection_manager: ToolInspectionManager,
     pub(super) hook_manager: crate::hooks::HookManager,
-    session_start_emitted: AtomicBool,
     #[cfg(test)]
     pub(super) stop_hook_block_cap_override: Option<u32>,
     container: Mutex<Option<Container>>,
     pub(super) goal: Mutex<Option<String>>,
     pub(super) grind: Mutex<Option<String>>,
     steer_queues: Mutex<HashMap<String, SteerQueue>>,
+    session_start_emitted: Mutex<HashSet<String>>,
 }
 
 fn ensure_message_event_id(event: AgentEvent) -> AgentEvent {
@@ -469,13 +468,13 @@ impl Agent {
                     use_login_shell_path,
                 )
             },
-            session_start_emitted: AtomicBool::new(false),
             #[cfg(test)]
             stop_hook_block_cap_override: None,
             container: Mutex::new(None),
             goal: Mutex::new(None),
             grind: Mutex::new(None),
             steer_queues: Mutex::new(HashMap::new()),
+            session_start_emitted: Mutex::new(HashSet::new()),
         }
     }
 
@@ -511,20 +510,69 @@ impl Agent {
             .await;
     }
 
-    pub async fn emit_hook_with_banners(
+    /// Emit `SessionStart`, labelled with what triggered it.
+    ///
+    /// The label is the whole point: a hook that resets the working tree is
+    /// safe to run that way at process start and destructive mid-session, and
+    /// without the label those two are the same event.
+    ///
+    /// The FIRST `SessionStart` of a session is always reported as `startup`,
+    /// whatever triggered it. A `/clear` can arrive before any turn has run —
+    /// an embedder that opens a session and immediately clears it does exactly
+    /// this — and at that point nothing has happened yet, so the working tree
+    /// is still disposable and this is a process start by any useful
+    /// definition. Reporting it as `clear` would tell a hook to take its
+    /// conservative mid-session path at the one moment its destructive path is
+    /// the correct one, leaving the tree in whatever state the previous process
+    /// left behind.
+    pub async fn emit_session_start_hook(
         &self,
-        event: crate::hooks::HookEvent,
         session_id: &str,
-    ) -> Vec<String> {
-        if event == crate::hooks::HookEvent::SessionStart {
-            self.session_start_emitted.store(true, Ordering::Release);
-        }
+        source: crate::hooks::SessionStartSource,
+    ) {
+        let event = crate::hooks::HookEvent::SessionStart;
         if !self.hook_manager.has_hooks(event) {
-            return Vec::new();
+            return;
         }
-        self.hook_manager
-            .emit_collecting_banners(event, crate::hooks::HookContext::new(event, session_id))
+        let is_first_of_session = self
+            .session_start_emitted
+            .lock()
             .await
+            .insert(session_id.to_string());
+        let source = if is_first_of_session {
+            crate::hooks::SessionStartSource::Startup
+        } else {
+            source
+        };
+        self.hook_manager
+            .emit(
+                event,
+                crate::hooks::HookContext::new(event, session_id).with_session_start_source(source),
+            )
+            .await;
+    }
+
+    /// Emit the `startup` `SessionStart` for a session's first agent turn, at
+    /// most once per session.
+    ///
+    /// The guard is load-bearing rather than tidiness. `/clear` empties the
+    /// conversation, so the turn after it looks like a first turn again — and
+    /// re-emitting from here would deliver a SECOND `startup`, the one value
+    /// that tells a hook the working tree is disposable. A mid-session clear
+    /// would then be reported to hooks as a process start and take the
+    /// destructive path this change exists to avoid.
+    async fn emit_startup_session_start_hook(&self, session_id: &str) {
+        if !self
+            .hook_manager
+            .has_hooks(crate::hooks::HookEvent::SessionStart)
+        {
+            return;
+        }
+        if self.session_start_emitted.lock().await.contains(session_id) {
+            return;
+        }
+        self.emit_session_start_hook(session_id, crate::hooks::SessionStartSource::Startup)
+            .await;
     }
 
     fn stop_hook_context(
@@ -2013,8 +2061,8 @@ impl Agent {
             return Ok(Box::pin(futures::stream::empty()));
         }
 
-        if is_first_agent_turn && !self.session_start_emitted.swap(true, Ordering::AcqRel) {
-            self.emit_hook(crate::hooks::HookEvent::SessionStart, &session_config.id)
+        if is_first_agent_turn {
+            self.emit_startup_session_start_hook(&session_config.id)
                 .await;
         }
 
@@ -4831,6 +4879,7 @@ exit 0
     struct SessionStartHookTestEnv {
         temp_dir: TempDir,
         hook_log: PathBuf,
+        payloads_path: PathBuf,
     }
 
     impl SessionStartHookTestEnv {
@@ -4857,12 +4906,15 @@ exit 0
                 plugin_dir.join("start.sh"),
                 r#"#!/bin/sh
 echo start >> "$PLUGIN_ROOT/hook.log"
+cat >> "$PLUGIN_ROOT/payloads.jsonl"
+echo "" >> "$PLUGIN_ROOT/payloads.jsonl"
 "#,
             )?;
 
             Ok(Self {
                 temp_dir,
                 hook_log: plugin_dir.join("hook.log"),
+                payloads_path: plugin_dir.join("payloads.jsonl"),
             })
         }
 
@@ -4883,6 +4935,24 @@ echo start >> "$PLUGIN_ROOT/hook.log"
                 .unwrap_or_default()
                 .lines()
                 .count()
+        }
+
+        /// The `source` field of every SessionStart payload the hook received,
+        /// in order. `None` for a payload that carried no `source` at all.
+        fn payload_sources(&self) -> Vec<Option<String>> {
+            std::fs::read_to_string(&self.payloads_path)
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| {
+                    let payload: Value =
+                        serde_json::from_str(line).expect("hook payload should be valid JSON");
+                    payload
+                        .get("source")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
+                .collect()
         }
     }
 
@@ -5282,6 +5352,114 @@ echo start >> "$PLUGIN_ROOT/hook.log"
 
         assert_eq!(env.hook_invocations(), 1);
         assert_eq!(provider.call_count(), 2);
+        assert_eq!(
+            env.payload_sources(),
+            vec![Some("startup".to_string())],
+            "a process start must be labelled `startup`"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn clear_command_re_emits_session_start_labelled_clear() -> Result<()> {
+        let env = SessionStartHookTestEnv::new()?;
+        let provider = Arc::new(CountingTextProvider::new());
+        let (agent, session_id) =
+            create_test_agent(env.data_dir(), env.hook_manager(), provider.clone()).await?;
+
+        run_stop_hook_test_turn(&agent, &session_id, "first").await?;
+        assert_eq!(env.payload_sources(), vec![Some("startup".to_string())]);
+
+        run_stop_hook_test_turn(&agent, &session_id, "/clear").await?;
+
+        assert_eq!(
+            env.payload_sources(),
+            vec![Some("startup".to_string()), Some("clear".to_string())],
+            "/clear must reach the hook layer, labelled `clear`"
+        );
+        Ok(())
+    }
+
+    /// The load-bearing guard. `/clear` empties the conversation, so the turn
+    /// AFTER it looks like a first agent turn again. Without the once-per-session
+    /// guard the reply path re-emits `startup` — the one value that tells a hook
+    /// the working tree is disposable — and a mid-session clear is reported to
+    /// hooks as a process start, taking the destructive `reset --hard` path this
+    /// change exists to avoid.
+    #[tokio::test]
+    async fn turn_after_clear_does_not_re_emit_startup() -> Result<()> {
+        let env = SessionStartHookTestEnv::new()?;
+        let provider = Arc::new(CountingTextProvider::new());
+        let (agent, session_id) =
+            create_test_agent(env.data_dir(), env.hook_manager(), provider.clone()).await?;
+
+        run_stop_hook_test_turn(&agent, &session_id, "first").await?;
+        run_stop_hook_test_turn(&agent, &session_id, "/clear").await?;
+        run_stop_hook_test_turn(&agent, &session_id, "after the clear").await?;
+
+        let sources = env.payload_sources();
+        assert_eq!(
+            sources,
+            vec![Some("startup".to_string()), Some("clear".to_string())],
+            "the post-clear turn must not deliver a second `startup`; got {sources:?}"
+        );
+        Ok(())
+    }
+
+    /// The fleet's actual dispatch shape. The container starts goose with zero
+    /// queued turns, and the first thing the server sends is `/clear`, followed by
+    /// the real command. Under the CLI that `/clear` reaches `handle_clear`, which
+    /// calls `emit_session_start_hook` DIRECTLY without going through `reply()` —
+    /// so the very first SessionStart of the process is triggered by a clear.
+    ///
+    /// It must still be labelled `startup`: at that moment nothing has run and the
+    /// working tree genuinely is disposable. Labelling it `clear` makes the repo
+    /// hook hold back at a real process start, leaving the checkout dirty or on the
+    /// previous ticket's branch — the stale-repo failure the unconditional reset
+    /// exists to prevent.
+    #[tokio::test]
+    async fn clear_before_any_turn_is_reported_as_the_process_start() -> Result<()> {
+        let env = SessionStartHookTestEnv::new()?;
+        let provider = Arc::new(CountingTextProvider::new());
+        let (agent, session_id) =
+            create_test_agent(env.data_dir(), env.hook_manager(), provider.clone()).await?;
+
+        agent
+            .emit_session_start_hook(&session_id, crate::hooks::SessionStartSource::Clear)
+            .await;
+
+        assert_eq!(
+            env.payload_sources(),
+            vec![Some("startup".to_string())],
+            "a clear arriving before anything else IS the process start"
+        );
+
+        run_stop_hook_test_turn(&agent, &session_id, "the first real message").await?;
+
+        let sources = env.payload_sources();
+        assert_eq!(
+            sources,
+            vec![Some("startup".to_string())],
+            "the first real turn must not deliver a second SessionStart; got {sources:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compact_command_re_emits_session_start_labelled_compact() -> Result<()> {
+        let env = SessionStartHookTestEnv::new()?;
+        let provider = Arc::new(CountingTextProvider::new());
+        let (agent, session_id) =
+            create_test_agent(env.data_dir(), env.hook_manager(), provider.clone()).await?;
+
+        run_stop_hook_test_turn(&agent, &session_id, "first").await?;
+        run_stop_hook_test_turn(&agent, &session_id, "/compact").await?;
+
+        assert_eq!(
+            env.payload_sources(),
+            vec![Some("startup".to_string()), Some("compact".to_string())],
+            "/compact must reach the hook layer, labelled `compact`"
+        );
         Ok(())
     }
 
