@@ -1057,6 +1057,11 @@ impl CliSession {
 
         self.messages.clear();
         tracing::info!("Chat context cleared by user.");
+
+        self.agent
+            .emit_session_start_hook(&self.session_id, goose::hooks::SessionStartSource::Clear)
+            .await;
+
         output::render_message(
             &Message::assistant().with_text("Chat context cleared.\n"),
             self.debug,

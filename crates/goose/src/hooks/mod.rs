@@ -102,6 +102,42 @@ impl std::fmt::Display for HookEvent {
     }
 }
 
+/// What caused a [`HookEvent::SessionStart`].
+///
+/// A hook that re-runs mid-session is not always safe to run the way it runs at
+/// process start: at process start the working tree is disposable, mid-session
+/// it may hold work the agent has not committed. Without this the two are
+/// indistinguishable in the payload, so a hook has to assume the destructive
+/// case is fine — or never re-run at all.
+///
+/// The values match the vocabulary Claude Code already uses for the same field,
+/// so a hook script can read one key and work under both engines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionStartSource {
+    /// The session is new — this is the first turn of a freshly started process.
+    Startup,
+    /// The conversation was cleared mid-session (`/clear`).
+    Clear,
+    /// The conversation was compacted mid-session (`/compact`).
+    Compact,
+}
+
+impl SessionStartSource {
+    fn name(&self) -> &'static str {
+        match self {
+            SessionStartSource::Startup => "startup",
+            SessionStartSource::Clear => "clear",
+            SessionStartSource::Compact => "compact",
+        }
+    }
+}
+
+impl std::fmt::Display for SessionStartSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// Top-level `hooks.json` shape.
 #[derive(Debug, Default, Deserialize)]
 struct HooksFile {
@@ -157,6 +193,9 @@ pub struct HookContext {
     pub event: String,
     pub session_id: String,
     pub matcher_context: Option<String>,
+    /// For `SessionStart` only: what triggered it. See [`SessionStartSource`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -177,6 +216,7 @@ impl HookContext {
             event: event.to_string(),
             session_id: session_id.into(),
             matcher_context: None,
+            source: None,
             tool_name: None,
             tool_input: None,
             tool_output: None,
@@ -184,6 +224,13 @@ impl HookContext {
             last_assistant_message: None,
             working_dir: None,
         }
+    }
+
+    /// Label a `SessionStart` with what triggered it, so a hook can tell a real
+    /// process start from a mid-session clear or compaction.
+    pub fn with_session_start_source(mut self, source: SessionStartSource) -> Self {
+        self.source = Some(source.to_string());
+        self
     }
 
     pub fn with_tool(mut self, tool_name: impl Into<String>, tool_input: Option<Value>) -> Self {
@@ -771,6 +818,69 @@ mod tests {
                 reason: "say something first".into(),
                 plugin: "p".into(),
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn session_start_payload_carries_the_source_that_triggered_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let payload_file = tmp.path().join("payload.json");
+        let hooks = format!(
+            r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"command","command":"sh -c 'cat > {path}'"}}]}}]}}}}"#,
+            path = payload_file.to_string_lossy(),
+        );
+        let root = write_plugin(tmp.path(), "p", &hooks);
+        let mgr = make_manager(vec![DiscoveredPlugin {
+            name: "p".into(),
+            root,
+            scope: PluginScope::User,
+        }]);
+
+        for source in [
+            SessionStartSource::Startup,
+            SessionStartSource::Clear,
+            SessionStartSource::Compact,
+        ] {
+            mgr.emit(
+                HookEvent::SessionStart,
+                HookContext::new(HookEvent::SessionStart, "session-1")
+                    .with_session_start_source(source),
+            )
+            .await;
+
+            let payload: Value =
+                serde_json::from_str(&std::fs::read_to_string(&payload_file).unwrap()).unwrap();
+            assert_eq!(payload["event"], "SessionStart");
+            assert_eq!(payload["source"], source.to_string());
+        }
+    }
+
+    /// A payload that carries no source must not grow an empty `source` key —
+    /// every non-SessionStart event keeps the exact shape it has today, so a
+    /// consumer that does not look at the new field sees no change at all.
+    #[tokio::test]
+    async fn non_session_start_payload_omits_the_source_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let payload_file = tmp.path().join("payload.json");
+        let hooks = format!(
+            r#"{{"hooks":{{"Stop":[{{"hooks":[{{"type":"command","command":"sh -c 'cat > {path}'"}}]}}]}}}}"#,
+            path = payload_file.to_string_lossy(),
+        );
+        let root = write_plugin(tmp.path(), "p", &hooks);
+        let mgr = make_manager(vec![DiscoveredPlugin {
+            name: "p".into(),
+            root,
+            scope: PluginScope::User,
+        }]);
+
+        mgr.emit(HookEvent::Stop, HookContext::new(HookEvent::Stop, "s"))
+            .await;
+
+        let payload: Value =
+            serde_json::from_str(&std::fs::read_to_string(&payload_file).unwrap()).unwrap();
+        assert!(
+            payload.get("source").is_none(),
+            "an unlabelled payload must omit `source` entirely, got {payload}"
         );
     }
 
