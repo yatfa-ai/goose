@@ -615,14 +615,6 @@ impl CliSession {
 
     /// Start an interactive session, optionally with an initial message
     pub async fn interactive(&mut self, prompt: Option<String>) -> Result<()> {
-        let banners = self
-            .agent
-            .emit_hook_with_banners(goose::hooks::HookEvent::SessionStart, &self.session_id)
-            .await;
-        if !banners.is_empty() {
-            output::display_banner(&banners);
-        }
-
         let result = self.run_interactive(prompt).await;
 
         self.agent
@@ -1189,6 +1181,11 @@ impl CliSession {
 
         self.messages.clear();
         tracing::info!("Chat context cleared by user.");
+
+        self.agent
+            .emit_session_start_hook(&self.session_id, goose::hooks::SessionStartSource::Clear)
+            .await;
+
         output::render_message(
             &Message::assistant().with_text("Chat context cleared.\n"),
             self.debug,
