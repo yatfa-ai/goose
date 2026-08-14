@@ -178,6 +178,9 @@ impl Agent {
         )
         .await?;
 
+        self.emit_session_start_hook(session_id, crate::hooks::SessionStartSource::Compact)
+            .await;
+
         Ok(Some(user_only_assistant_text("Compaction complete")))
     }
 
@@ -198,6 +201,9 @@ impl Agent {
             ))
             .apply()
             .await?;
+
+        self.emit_session_start_hook(session_id, crate::hooks::SessionStartSource::Clear)
+            .await;
 
         Ok(Some(user_only_assistant_text("Conversation cleared")))
     }
