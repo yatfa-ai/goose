@@ -96,6 +96,32 @@ impl TodoState {
     pub fn new(content: String) -> Self {
         Self { content }
     }
+
+    /// Empty the session's stored todo.
+    ///
+    /// `/clear` replaces the conversation, but the todo does not live in
+    /// `messages` — it lives on the session row in `extension_data`, so it
+    /// survives the reset and `TodoRouter::get_moim` keeps re-injecting the
+    /// previous task's list into every subsequent turn.
+    ///
+    /// This writes empty content through the same typed path `todo_write`
+    /// uses rather than deleting the key: `ExtensionData` exposes no removal,
+    /// and `get_moim` already treats empty content and an absent key alike.
+    /// Going through `ExtensionState` also keeps the key derived from
+    /// `EXTENSION_NAME`/`VERSION` instead of spelling `todo.v0` out here.
+    pub async fn clear_for_session(
+        session_manager: &SessionManager,
+        session_id: &str,
+    ) -> Result<()> {
+        let mut session = session_manager.get_session(session_id, false).await?;
+        Self::new(String::new()).to_extension_data(&mut session.extension_data)?;
+        session_manager
+            .update(session_id)
+            .extension_data(session.extension_data)
+            .apply()
+            .await?;
+        Ok(())
+    }
 }
 
 /// Enabled extensions state implementation for storing which extensions are active
@@ -164,6 +190,88 @@ mod tests {
             bundled: None,
             available_tools: vec![],
         }
+    }
+
+    async fn session_with_todo(sm: &SessionManager, todo: &str) -> String {
+        let id = sm
+            .create_session(
+                std::path::PathBuf::from("/tmp"),
+                "s".to_string(),
+                crate::session::SessionType::User,
+                crate::config::GooseMode::default(),
+            )
+            .await
+            .unwrap()
+            .id;
+
+        let mut session = sm.get_session(&id, false).await.unwrap();
+        TodoState::new(todo.to_string())
+            .to_extension_data(&mut session.extension_data)
+            .unwrap();
+        sm.update(&id)
+            .extension_data(session.extension_data)
+            .apply()
+            .await
+            .unwrap();
+        id
+    }
+
+    /// `/clear` resets the conversation but the todo lives on the session row,
+    /// so without this it survives and keeps being injected into every turn.
+    #[tokio::test]
+    async fn clear_for_session_empties_the_todo() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let id = session_with_todo(&sm, "- carried over from the PREVIOUS task").await;
+
+        let before = sm.get_session(&id, false).await.unwrap();
+        assert_eq!(
+            TodoState::from_extension_data(&before.extension_data)
+                .unwrap()
+                .content,
+            "- carried over from the PREVIOUS task",
+            "fixture did not actually store a todo, so the assertion below would be vacuous"
+        );
+
+        TodoState::clear_for_session(&sm, &id).await.unwrap();
+
+        let after = sm.get_session(&id, false).await.unwrap();
+        let content = TodoState::from_extension_data(&after.extension_data)
+            .map(|s| s.content)
+            .unwrap_or_default();
+        assert!(
+            content.trim().is_empty(),
+            "todo survived the clear: {content:?}"
+        );
+    }
+
+    /// The narrow guarantee. `extension_data` also holds the live list of
+    /// enabled extensions, so clearing the whole map — the obvious
+    /// "simplification" of the above — would silently drop the session's
+    /// extensions along with the todo.
+    #[tokio::test]
+    async fn clear_for_session_leaves_enabled_extensions_alone() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let id = session_with_todo(&sm, "- something").await;
+
+        let mut session = sm.get_session(&id, false).await.unwrap();
+        EnabledExtensionsState::new(vec![test_extension()])
+            .to_extension_data(&mut session.extension_data)
+            .unwrap();
+        sm.update(&id)
+            .extension_data(session.extension_data)
+            .apply()
+            .await
+            .unwrap();
+
+        TodoState::clear_for_session(&sm, &id).await.unwrap();
+
+        let after = sm.get_session(&id, false).await.unwrap();
+        let kept =
+            <EnabledExtensionsState as ExtensionState>::from_extension_data(&after.extension_data)
+                .expect("clearing the todo must not remove the enabled-extensions state");
+        assert_eq!(kept.extensions.len(), 1);
     }
 
     fn extension_data_with(extensions: Vec<ExtensionConfig>) -> ExtensionData {

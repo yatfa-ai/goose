@@ -1179,6 +1179,19 @@ impl CliSession {
             return Ok(());
         }
 
+        // The todo lives on the session row, not in `messages`, so the
+        // conversation reset above leaves it behind and every later turn is
+        // still steered by the discarded task's list.
+        if let Err(e) = goose::session::extension_data::TodoState::clear_for_session(
+            &self.agent.config.session_manager,
+            &self.session_id,
+        )
+        .await
+        {
+            output::render_error(&format!("Failed to clear todo list: {}", e));
+            return Ok(());
+        }
+
         self.messages.clear();
         tracing::info!("Chat context cleared by user.");
 
