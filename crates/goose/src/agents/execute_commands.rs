@@ -202,6 +202,11 @@ impl Agent {
             .apply()
             .await?;
 
+        // The todo lives on the session row, not in `messages`, so the
+        // conversation reset above leaves it behind and every later turn is
+        // still steered by the discarded task's list.
+        crate::session::extension_data::TodoState::clear_for_session(&manager, session_id).await?;
+
         self.emit_session_start_hook(session_id, crate::hooks::SessionStartSource::Clear)
             .await;
 
