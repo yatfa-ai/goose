@@ -1,0 +1,44 @@
+name: yatfa-test
+
+on:
+  push:
+    branches:
+      - main
+      - "sync-*"
+  workflow_dispatch:
+
+concurrency:
+  group: yatfa-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Format
+        run: cargo fmt --check
+
+      # The feature sets are load-bearing, not cosmetic:
+      # - goose needs code-mode (the committed prompt-manager snapshots include
+      #   the code_execution extension) and rustls-tls (jsonwebtoken resolves
+      #   its CryptoProvider only when goose/rustls-tls pulls aws_lc_rs in; a
+      #   bare `cargo test -p goose` builds goose with an empty feature set and
+      #   four JWT tests panic with "no CryptoProvider").
+      # - goose-cli is built exactly as yatfa-release.yml ships it, which is
+      #   also the only configuration that skips the llama/cmake backend.
+      - name: Clippy (goose)
+        run: cargo clippy -p goose --all-targets --features "code-mode,rustls-tls" -- -D warnings
+
+      - name: Clippy (goose-cli)
+        run: cargo clippy -p goose-cli --no-default-features --features "rustls-tls" --all-targets -- -D warnings
+
+      - name: Test (goose)
+        run: cargo test -p goose --features "code-mode,rustls-tls" --no-fail-fast
+
+      - name: Test (goose-cli)
+        run: cargo test -p goose-cli --no-default-features --features "rustls-tls" --lib
