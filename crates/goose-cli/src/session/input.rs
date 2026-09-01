@@ -211,6 +211,15 @@ pub fn get_input(
         rustyline::EventHandler::Simple(rustyline::Cmd::Newline),
     );
 
+    // Alt is transmitted as an ESC prefix (`\e\r`), so Alt+Enter reaches
+    // rustyline as Enter+ALT — the one Enter modifier that is bindable at all.
+    // Plain Shift+Enter and Ctrl+Enter are indistinguishable from Enter: the
+    // terminal sends the same `\r` for all three (Ctrl+M *is* Enter).
+    editor.bind_sequence(
+        rustyline::KeyEvent(rustyline::KeyCode::Enter, rustyline::Modifiers::ALT),
+        rustyline::EventHandler::Simple(rustyline::Cmd::Newline),
+    );
+
     editor.bind_sequence(
         rustyline::KeyEvent(rustyline::KeyCode::Char('c'), rustyline::Modifiers::CTRL),
         rustyline::EventHandler::Conditional(Box::new(CtrlCHandler::new(completion_cache))),
@@ -484,6 +493,7 @@ fn help_text() -> String {
 Navigation:
 Enter - Send message
 Ctrl+{newline_key} - Add a newline (configurable via GOOSE_CLI_NEWLINE_KEY)
+Alt+Enter - Add a newline
 {ctrl_c_help}
 Up/Down arrows - Navigate through command history
 GOOSE_CLI_BELL=true - Ring the terminal bell when goose finishes a turn or needs approval"
