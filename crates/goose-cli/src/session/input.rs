@@ -118,7 +118,12 @@ fn exit_on_interrupt() -> bool {
 ///
 /// - line has text: clear it (and reset any armed exit);
 /// - empty line, exit enabled: first press arms the hint, second press exits;
-/// - empty line, exit disabled: no-op — Ctrl+C never exits.
+/// - empty line, exit disabled: `Cmd::Noop` — Ctrl+C never exits.
+///
+/// Declining the event with `None` would not suppress the keypress: rustyline
+/// then falls back to the terminal's own VINTR binding, which is
+/// `Cmd::Interrupt` and ends `readline` with `ReadlineError::Interrupted` —
+/// exactly the exit this is meant to prevent. The no-op has to be explicit.
 fn ctrl_c_outcome(
     line: &str,
     hint_status: HintStatus,
@@ -131,7 +136,7 @@ fn ctrl_c_outcome(
         );
     }
     if !exit_on_interrupt {
-        return (None, HintStatus::Default);
+        return (Some(rustyline::Cmd::Noop), HintStatus::Default);
     }
     match hint_status {
         HintStatus::MaybeExit => (Some(rustyline::Cmd::Interrupt), HintStatus::MaybeExit),
@@ -611,13 +616,13 @@ mod tests {
     fn ctrl_c_never_exits_when_exit_disabled() {
         // First press on an empty line is a no-op.
         let (cmd, status) = ctrl_c_outcome("", HintStatus::Default, false);
-        assert!(cmd.is_none());
+        assert!(matches!(cmd, Some(rustyline::Cmd::Noop)));
         assert_eq!(status, HintStatus::Default);
 
         // Even with MaybeExit already armed (e.g. the flag flipped mid-session),
         // an empty line does not exit.
         let (cmd, _status) = ctrl_c_outcome("", HintStatus::MaybeExit, false);
-        assert!(cmd.is_none());
+        assert!(matches!(cmd, Some(rustyline::Cmd::Noop)));
     }
 
     #[test]
