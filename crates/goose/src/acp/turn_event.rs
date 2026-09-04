@@ -30,4 +30,9 @@ pub enum AcpTurnEvent {
 }
 
 /// Channel side the run-side ACP server taps into.
-pub type AcpTurnTap = tokio::sync::mpsc::Sender<AcpTurnEvent>;
+///
+/// Unbounded: `TurnDone`/`TurnFailed` are what return the terminal to a clean
+/// state, so a chatty turn must not be able to push them out of a fixed-size
+/// queue. The consumer is a plain render loop, so the queue drains as fast as
+/// the terminal can take it.
+pub type AcpTurnTap = tokio::sync::mpsc::UnboundedSender<AcpTurnEvent>;

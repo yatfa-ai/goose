@@ -853,13 +853,11 @@ impl GooseAcpAgent {
     }
 
     /// Duplicate a turn tick onto the run-side TUI's mirror channel, if one was
-    /// attached by `maybe_serve_acp_on_run`. Best-effort: a full channel or no
-    /// attached TUI drops the event without affecting the ACP reply path.
+    /// attached by `maybe_serve_acp_on_run`. Never blocks the ACP reply path;
+    /// the send only fails once the TUI has gone away.
     fn tap_turn_event(&self, event: crate::acp::AcpTurnEvent) {
         if let Some(tap) = &self.event_tap {
-            if tap.try_send(event).is_err() {
-                tracing::debug!("acp turn-event tap full or closed; dropping");
-            }
+            let _ = tap.send(event);
         }
     }
 

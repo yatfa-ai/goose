@@ -956,7 +956,7 @@ pub async fn build_session(session_config: SessionBuilderConfig) -> CliSession {
 async fn maybe_serve_acp_on_run(
     agent: Arc<Agent>,
     session_id: &str,
-) -> Option<tokio::sync::mpsc::Receiver<goose::acp::AcpTurnEvent>> {
+) -> Option<tokio::sync::mpsc::UnboundedReceiver<goose::acp::AcpTurnEvent>> {
     use goose::acp::server::AcpBuiltinSelection;
     use goose::acp::server_factory::{AcpServer, AcpServerFactoryConfig};
     use goose::agents::AgentConfig;
@@ -1003,7 +1003,8 @@ async fn maybe_serve_acp_on_run(
     // sender; the owning interactive TUI drains the receiver so ACP turns render
     // in the terminal like user-typed ones instead of vanishing into the
     // loopback WebSocket.
-    let (event_tap_tx, event_tap_rx) = tokio::sync::mpsc::channel::<goose::acp::AcpTurnEvent>(64);
+    let (event_tap_tx, event_tap_rx) =
+        tokio::sync::mpsc::unbounded_channel::<goose::acp::AcpTurnEvent>();
 
     let server = Arc::new(AcpServer::new(AcpServerFactoryConfig {
         builtins: AcpBuiltinSelection {

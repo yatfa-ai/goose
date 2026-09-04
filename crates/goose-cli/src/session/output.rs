@@ -29,6 +29,58 @@ pub const DEFAULT_CLI_DARK_THEME: &str = "zenburn";
 const OUTPUT_TOKEN_LIMIT_WARNING: &str =
     "Warning: Response reached the model's output-token limit and may be incomplete.";
 
+thread_local! {
+    static CAPTURE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Render on this thread into a string instead of writing to stdout.
+///
+/// The ACP turn mirror renders while rustyline owns the prompt line, so it has
+/// to hand finished output to the editor's external printer instead of writing
+/// into a line the editor is redrawing. Spinners are suppressed for the
+/// duration: a self-repainting widget cannot be handed over as a string, and
+/// one left ticking behind the prompt is what corrupts the line.
+pub fn capture<R>(f: impl FnOnce() -> R) -> (String, R) {
+    CAPTURE.with(|slot| *slot.borrow_mut() = Some(String::new()));
+    let value = f();
+    let rendered = CAPTURE
+        .with(|slot| slot.borrow_mut().take())
+        .unwrap_or_default();
+    (rendered, value)
+}
+
+fn capturing() -> bool {
+    CAPTURE.with(|slot| slot.borrow().is_some())
+}
+
+fn emit_args(args: std::fmt::Arguments) {
+    CAPTURE.with(|slot| match slot.borrow_mut().as_mut() {
+        Some(buffer) => {
+            let _ = std::fmt::Write::write_fmt(buffer, args);
+        }
+        None => std::print!("{}", args),
+    });
+}
+
+fn emitln_args(args: std::fmt::Arguments) {
+    CAPTURE.with(|slot| match slot.borrow_mut().as_mut() {
+        Some(buffer) => {
+            let _ = std::fmt::Write::write_fmt(buffer, args);
+            buffer.push('\n');
+        }
+        None => println!("{}", args),
+    });
+}
+
+macro_rules! emit {
+    ($($arg:tt)*) => { emit_args(format_args!($($arg)*)) };
+}
+
+macro_rules! emitln {
+    () => { emitln_args(format_args!("")) };
+    ($($arg:tt)*) => { emitln_args(format_args!($($arg)*)) };
+}
+
 fn accent<T: Display>(value: T) -> StyledObject<T> {
     style(value).cyan()
 }
@@ -185,12 +237,18 @@ thread_local! {
 }
 
 pub fn show_thinking() {
+    if capturing() {
+        return;
+    }
     if std::io::stdout().is_terminal() {
         THINKING.with(|t| t.borrow_mut().show());
     }
 }
 
 pub fn hide_thinking() {
+    if capturing() {
+        return;
+    }
     if std::io::stdout().is_terminal() {
         THINKING.with(|t| t.borrow_mut().hide());
     }
@@ -249,27 +307,27 @@ pub fn render_message(message: &Message, debug: bool) {
         match content {
             MessageContent::ActionRequired(action) => match &action.data {
                 ActionRequiredData::ToolConfirmation { tool_name, .. } => {
-                    println!("action_required(tool_confirmation): {}", tool_name)
+                    emitln!("action_required(tool_confirmation): {}", tool_name)
                 }
                 ActionRequiredData::Elicitation { message, .. } => {
-                    println!("action_required(elicitation): {}", message)
+                    emitln!("action_required(elicitation): {}", message)
                 }
                 ActionRequiredData::ElicitationResponse { id, .. } => {
-                    println!("action_required(elicitation_response): {}", id)
+                    emitln!("action_required(elicitation_response): {}", id)
                 }
                 ActionRequiredData::ToolConfirmationResponse { id, .. } => {
-                    println!("action_required(tool_confirmation_response): {}", id)
+                    emitln!("action_required(tool_confirmation_response): {}", id)
                 }
             },
             MessageContent::Text(text) => print_markdown(&text.text, theme),
             MessageContent::ToolRequest(req) => render_tool_request(req, theme, debug),
             MessageContent::ToolResponse(resp) => render_tool_response(resp, debug),
             MessageContent::Image(image) => {
-                println!("Image: [data: {}, type: {}]", image.data, image.mime_type);
+                emitln!("Image: [data: {}, type: {}]", image.data, image.mime_type);
             }
             MessageContent::Thinking(t) => render_thinking(&t.thinking, theme),
             MessageContent::RedactedThinking(_) => {
-                println!("\n{}", style("Thinking:").dim().italic());
+                emitln!("\n{}", style("Thinking:").dim().italic());
                 print_markdown("Thinking was redacted", theme);
             }
             MessageContent::SystemNotification(notification) => {
@@ -281,7 +339,7 @@ pub fn render_message(message: &Message, debug: bool) {
                     }
                     SystemNotificationType::InlineMessage => {
                         hide_thinking();
-                        println!("\n{} {}", style("·").dim(), &notification.msg);
+                        emitln!("\n{} {}", style("·").dim(), &notification.msg);
                     }
                     SystemNotificationType::CreditsExhausted => {
                         render_credits_exhausted_notification(notification);
@@ -290,7 +348,7 @@ pub fn render_message(message: &Message, debug: bool) {
             }
             MessageContent::Error(error) => {
                 hide_thinking();
-                println!("\n{} {}", danger("error:").bold(), &error.message);
+                emitln!("\n{} {}", danger("error:").bold(), &error.message);
             }
             _ => {
                 eprintln!("WARNING: Message content type could not be rendered");
@@ -321,7 +379,7 @@ pub fn render_message_streaming(
     for content in &message.content {
         if !matches!(content, MessageContent::Thinking(_)) {
             if *thinking_header_shown {
-                println!();
+                emitln!();
             }
             *thinking_header_shown = false;
         }
@@ -344,29 +402,29 @@ pub fn render_message_streaming(
                 flush_markdown_buffer(buffer, theme);
                 match &action.data {
                     ActionRequiredData::ToolConfirmation { tool_name, .. } => {
-                        println!("action_required(tool_confirmation): {}", tool_name)
+                        emitln!("action_required(tool_confirmation): {}", tool_name)
                     }
                     ActionRequiredData::Elicitation { message, .. } => {
-                        println!("action_required(elicitation): {}", message)
+                        emitln!("action_required(elicitation): {}", message)
                     }
                     ActionRequiredData::ElicitationResponse { id, .. } => {
-                        println!("action_required(elicitation_response): {}", id)
+                        emitln!("action_required(elicitation_response): {}", id)
                     }
                     ActionRequiredData::ToolConfirmationResponse { id, .. } => {
-                        println!("action_required(tool_confirmation_response): {}", id)
+                        emitln!("action_required(tool_confirmation_response): {}", id)
                     }
                 }
             }
             MessageContent::Image(image) => {
                 flush_markdown_buffer(buffer, theme);
-                println!("Image: [data: {}, type: {}]", image.data, image.mime_type);
+                emitln!("Image: [data: {}, type: {}]", image.data, image.mime_type);
             }
             MessageContent::Thinking(t) => {
                 render_thinking_streaming(&t.thinking, buffer, thinking_header_shown, theme);
             }
             MessageContent::RedactedThinking(_) => {
                 flush_markdown_buffer(buffer, theme);
-                println!("\n{}", style("Thinking:").dim().italic());
+                emitln!("\n{}", style("Thinking:").dim().italic());
                 print_markdown("Thinking was redacted", theme);
             }
             MessageContent::SystemNotification(notification) => {
@@ -379,7 +437,7 @@ pub fn render_message_streaming(
                     SystemNotificationType::InlineMessage => {
                         flush_markdown_buffer(buffer, theme);
                         hide_thinking();
-                        println!("\n{} {}", style("·").dim(), &notification.msg);
+                        emitln!("\n{} {}", style("·").dim(), &notification.msg);
                     }
                     SystemNotificationType::CreditsExhausted => {
                         flush_markdown_buffer(buffer, theme);
@@ -390,7 +448,7 @@ pub fn render_message_streaming(
             MessageContent::Error(error) => {
                 flush_markdown_buffer(buffer, theme);
                 hide_thinking();
-                println!("\n{} {}", danger("error:").bold(), &error.message);
+                emitln!("\n{} {}", danger("error:").bold(), &error.message);
             }
             _ => {
                 flush_markdown_buffer(buffer, theme);
@@ -411,12 +469,12 @@ fn reached_output_token_limit(message: &Message) -> bool {
 }
 
 fn render_output_token_limit_warning() {
-    println!("\n{}", warning(OUTPUT_TOKEN_LIMIT_WARNING));
+    emitln!("\n{}", warning(OUTPUT_TOKEN_LIMIT_WARNING));
 }
 
 fn render_credits_exhausted_notification(notification: &SystemNotificationContent) {
     hide_thinking();
-    println!("\n{} {}", warning("warning:").bold(), &notification.msg);
+    emitln!("\n{} {}", warning("warning:").bold(), &notification.msg);
 
     if let Some(url) = notification
         .data
@@ -424,7 +482,7 @@ fn render_credits_exhausted_notification(notification: &SystemNotificationConten
         .and_then(|d| d.get("top_up_url"))
         .and_then(|v| v.as_str())
     {
-        println!("{} {}", style("top up:").dim(), accent(url));
+        emitln!("{} {}", style("top up:").dim(), accent(url));
     }
 }
 
@@ -462,7 +520,7 @@ pub fn render_text(text: &str, color: Option<Color>, dim: bool) {
 
 pub fn render_text_no_newlines(text: &str, color: Option<Color>, dim: bool) {
     if !std::io::stdout().is_terminal() {
-        println!("{}", text);
+        emitln!("{}", text);
         return;
     }
     let mut styled_text = style(text);
@@ -472,11 +530,11 @@ pub fn render_text_no_newlines(text: &str, color: Option<Color>, dim: bool) {
     if let Some(color) = color {
         styled_text = styled_text.fg(color);
     }
-    print!("{}", styled_text);
+    emit!("{}", styled_text);
 }
 
 pub fn render_enter_plan_mode() {
-    println!(
+    emitln!(
         "\n{} {}\n",
         accent("Entering plan mode.").bold(),
         style("You can provide instructions to create a plan and then act on it. To exit early, type /endplan")
@@ -485,18 +543,18 @@ pub fn render_enter_plan_mode() {
 }
 
 pub fn render_act_on_plan() {
-    println!(
+    emitln!(
         "\n{}\n",
         accent("Exiting plan mode and acting on the above plan").bold(),
     );
 }
 
 pub fn render_exit_plan_mode() {
-    println!("\n{}\n", accent("Exiting plan mode.").bold());
+    emitln!("\n{}\n", accent("Exiting plan mode.").bold());
 }
 
 pub fn goose_mode_message(text: &str) {
-    println!("\n{} {}", accent("mode:"), text);
+    emitln!("\n{} {}", accent("mode:"), text);
 }
 
 fn should_show_thinking() -> bool {
@@ -508,7 +566,7 @@ fn should_show_thinking() -> bool {
 
 fn render_thinking(text: &str, theme: Theme) {
     if should_show_thinking() {
-        println!("\n{}", style("Thinking:").dim().italic());
+        emitln!("\n{}", style("Thinking:").dim().italic());
         print_markdown(text, theme);
     }
 }
@@ -522,10 +580,10 @@ fn render_thinking_streaming(
     if should_show_thinking() {
         flush_markdown_buffer(buffer, theme);
         if !*header_shown {
-            println!("\n{}", style("Thinking:").dim().italic());
+            emitln!("\n{}", style("Thinking:").dim().italic());
             *header_shown = true;
         }
-        print!("{}", style(text).dim());
+        emit!("{}", style(text).dim());
         let _ = std::io::stdout().flush();
     }
 }
@@ -579,14 +637,14 @@ fn render_tool_response(resp: &ToolResponse, debug: bool) {
                 }
 
                 if debug {
-                    println!("{:#?}", content);
+                    emitln!("{:#?}", content);
                 } else if let Some(text) = content.as_text() {
                     print_tool_output(&text.text);
                 }
             }
         }
         Err(e) => {
-            println!("    {}", style(e.to_string()).red().dim());
+            emitln!("    {}", style(e.to_string()).red().dim());
         }
     }
 }
@@ -599,7 +657,7 @@ pub(super) fn sanitize_terminal_line(line: &str) -> String {
 }
 
 fn print_tool_output_line(line: &str) {
-    println!("    {}", style(sanitize_terminal_line(line)).dim());
+    emitln!("    {}", style(sanitize_terminal_line(line)).dim());
 }
 
 fn print_tool_output(text: &str) {
@@ -607,7 +665,7 @@ fn print_tool_output(text: &str) {
         return;
     }
     if !std::io::stdout().is_terminal() {
-        print!("{}", text);
+        emit!("{}", text);
         return;
     }
     let max_lines = if get_show_full_tool_output() {
@@ -626,7 +684,7 @@ fn print_tool_output(text: &str) {
         for line in &lines[..head] {
             print_tool_output_line(line);
         }
-        println!(
+        emitln!(
             "    {}",
             style(format!(
                 "... ({} lines hidden, /toggle to show all)",
@@ -650,36 +708,36 @@ fn is_file_tool_name(name: &str) -> bool {
 }
 
 pub fn render_error(message: &str) {
-    println!("\n  {} {}\n", danger("error:").bold(), message);
+    emitln!("\n  {} {}\n", danger("error:").bold(), message);
 }
 
 pub fn render_prompts(prompts: &HashMap<String, Vec<String>>) {
-    println!();
+    emitln!();
     for (extension, prompts) in prompts {
-        println!(" {}", accent(extension));
+        emitln!(" {}", accent(extension));
         for prompt in prompts {
-            println!("  - {}", style(prompt).cyan());
+            emitln!("  - {}", style(prompt).cyan());
         }
     }
-    println!();
+    emitln!();
 }
 
 pub fn render_prompt_info(info: &PromptInfo) {
-    println!();
+    emitln!();
     if let Some(ext) = &info.extension {
-        println!(" {}: {}", accent("Extension"), ext);
+        emitln!(" {}: {}", accent("Extension"), ext);
     }
-    println!(" Prompt: {}", style(&info.name).cyan().bold());
+    emitln!(" Prompt: {}", style(&info.name).cyan().bold());
     if let Some(desc) = &info.description {
-        println!("\n {}", desc);
+        emitln!("\n {}", desc);
     }
     render_arguments(info);
-    println!();
+    emitln!();
 }
 
 fn render_arguments(info: &PromptInfo) {
     if let Some(args) = &info.arguments {
-        println!("\n Arguments:");
+        emitln!("\n Arguments:");
         for arg in args {
             let required = arg.required.unwrap_or(false);
             let req_str = if required {
@@ -688,7 +746,7 @@ fn render_arguments(info: &PromptInfo) {
                 style("(optional)").dim()
             };
 
-            println!(
+            emitln!(
                 "  {} {} {}",
                 accent(&arg.name),
                 req_str,
@@ -699,41 +757,41 @@ fn render_arguments(info: &PromptInfo) {
 }
 
 pub fn render_extension_success(name: &str) {
-    println!();
-    println!("  {} extension `{}`", success("added"), accent(name),);
-    println!();
+    emitln!();
+    emitln!("  {} extension `{}`", success("added"), accent(name),);
+    emitln!();
 }
 
 pub fn render_extension_error(name: &str, error: &str) {
-    println!();
-    println!("  {} to add extension {}", danger("failed"), danger(name));
-    println!();
-    println!("{}", style(error).dim());
-    println!();
+    emitln!();
+    emitln!("  {} to add extension {}", danger("failed"), danger(name));
+    emitln!();
+    emitln!("{}", style(error).dim());
+    emitln!();
 }
 
 pub fn render_builtin_success(names: &str) {
-    println!();
-    println!(
+    emitln!();
+    emitln!(
         "  {} builtin{}: {}",
         success("added"),
         if names.contains(',') { "s" } else { "" },
         accent(names)
     );
-    println!();
+    emitln!();
 }
 
 pub fn render_builtin_error(names: &str, error: &str) {
-    println!();
-    println!(
+    emitln!();
+    emitln!(
         "  {} to add builtin{}: {}",
         danger("failed"),
         if names.contains(',') { "s" } else { "" },
         danger(names)
     );
-    println!();
-    println!("{}", style(error).dim());
-    println!();
+    emitln!();
+    emitln!("{}", style(error).dim());
+    emitln!();
 }
 
 fn render_text_editor_request(call: &CallToolRequestParams, debug: bool) {
@@ -741,7 +799,7 @@ fn render_text_editor_request(call: &CallToolRequestParams, debug: bool) {
 
     if let Some(args) = &call.arguments {
         if let Some(Value::String(path)) = args.get("path") {
-            println!(
+            emitln!(
                 "    {} {}",
                 style("path").dim(),
                 style(shorten_path(path, debug)).dim()
@@ -760,13 +818,13 @@ fn render_text_editor_request(call: &CallToolRequestParams, debug: bool) {
             }
         }
     }
-    println!();
+    emitln!();
 }
 
 fn render_shell_request(call: &CallToolRequestParams, debug: bool) {
     print_tool_header(call);
     print_params(&call.arguments, 1, debug);
-    println!();
+    emitln!();
 }
 
 fn render_execute_code_request(call: &CallToolRequestParams, debug: bool) {
@@ -783,8 +841,8 @@ fn render_execute_code_request(call: &CallToolRequestParams, debug: bool) {
 
     let count = tool_graph.len();
     let plural = if count == 1 { "" } else { "s" };
-    println!();
-    println!(
+    emitln!();
+    emitln!(
         "  {} {} {} tool call{}",
         style("▸").dim(),
         style("execute").dim(),
@@ -814,7 +872,7 @@ fn render_execute_code_request(call: &CallToolRequestParams, debug: bool) {
         } else {
             format!(" (uses {})", deps.join(", "))
         };
-        println!(
+        emitln!(
             "    {}. {} {}{}",
             style(i + 1).dim(),
             style(tool).dim(),
@@ -830,10 +888,10 @@ fn render_execute_code_request(call: &CallToolRequestParams, debug: bool) {
         .and_then(Value::as_str)
         .filter(|c| !c.is_empty());
     if code.is_some_and(|_| debug) {
-        println!("{}", code.unwrap_or_default());
+        emitln!("{}", code.unwrap_or_default());
     }
 
-    println!();
+    emitln!();
 }
 
 fn render_delegate_request(call: &CallToolRequestParams, debug: bool) {
@@ -841,7 +899,7 @@ fn render_delegate_request(call: &CallToolRequestParams, debug: bool) {
 
     if let Some(args) = &call.arguments {
         if let Some(Value::String(source)) = args.get("source") {
-            println!("    {} {}", style("source").dim(), style(source).dim());
+            emitln!("    {} {}", style("source").dim(), style(source).dim());
         }
 
         if let Some(Value::String(instructions)) = args.get("instructions") {
@@ -850,7 +908,7 @@ fn render_delegate_request(call: &CallToolRequestParams, debug: bool) {
             } else {
                 instructions.clone()
             };
-            println!(
+            emitln!(
                 "    {} {}",
                 style("instructions").dim(),
                 style(display).dim()
@@ -858,7 +916,7 @@ fn render_delegate_request(call: &CallToolRequestParams, debug: bool) {
         }
 
         if let Some(Value::Object(params)) = args.get("parameters") {
-            println!("    {}:", style("parameters").dim());
+            emitln!("    {}:", style("parameters").dim());
             print_params(&Some(params.clone()), 2, debug);
         }
 
@@ -874,7 +932,7 @@ fn render_delegate_request(call: &CallToolRequestParams, debug: bool) {
         }
     }
 
-    println!();
+    emitln!();
 }
 
 fn render_todo_request(call: &CallToolRequestParams, _debug: bool) {
@@ -882,16 +940,16 @@ fn render_todo_request(call: &CallToolRequestParams, _debug: bool) {
 
     if let Some(args) = &call.arguments {
         if let Some(Value::String(content)) = args.get("content") {
-            println!("    {} {}", style("content").dim(), style(content).dim());
+            emitln!("    {} {}", style("content").dim(), style(content).dim());
         }
     }
-    println!();
+    emitln!();
 }
 
 fn render_default_request(call: &CallToolRequestParams, debug: bool) {
     print_tool_header(call);
     print_params(&call.arguments, 1, debug);
-    println!();
+    emitln!();
 }
 
 fn extension_display_name(name: &str) -> &str {
@@ -936,18 +994,18 @@ pub fn render_subagent_tool_call(
         style("▸").dim(),
         style(format_subagent_tool_call_message(subagent_id, tool_name)).dim(),
     );
-    println!();
-    println!("{}", tool_header);
+    emitln!();
+    emitln!("{}", tool_header);
     print_params(&arguments.cloned(), 1, debug);
-    println!();
+    emitln!();
 }
 
 fn render_subagent_tool_graph(subagent_id: &str, tool_graph: &[Value]) {
     let short_id = subagent_id.rsplit('_').next().unwrap_or(subagent_id);
     let count = tool_graph.len();
     let plural = if count == 1 { "" } else { "s" };
-    println!();
-    println!(
+    emitln!();
+    emitln!(
         "  {} {} {} {} tool call{}",
         style("▸").dim(),
         style(format!("[subagent:{}]", short_id)).dim(),
@@ -978,7 +1036,7 @@ fn render_subagent_tool_graph(subagent_id: &str, tool_graph: &[Value]) {
         } else {
             format!(" (uses {})", deps.join(", "))
         };
-        println!(
+        emitln!(
             "    {}. {} {}{}",
             style(i + 1).dim(),
             style(tool).dim(),
@@ -986,7 +1044,7 @@ fn render_subagent_tool_graph(subagent_id: &str, tool_graph: &[Value]) {
             style(deps_str).dim()
         );
     }
-    println!();
+    emitln!();
 }
 
 // Helper functions
@@ -1004,9 +1062,9 @@ fn print_tool_header(call: &CallToolRequestParams) {
         ),
         None => format!("  {} {}", style("▸").dim(), style(parts.tool_name).dim()),
     };
-    println!();
-    println!("  {}", style("─".repeat(40)).dim());
-    println!("{}", tool_header);
+    emitln!();
+    emitln!("  {}", style("─".repeat(40)).dim());
+    emitln!("{}", tool_header);
 }
 
 // Respect NO_COLOR, as https://crates.io/crates/console already does
@@ -1029,7 +1087,7 @@ fn print_markdown(content: &str, theme: Theme) {
             print_markdown_raw(content, theme);
         }
     } else {
-        print!("{}", content);
+        emit!("{}", content);
     }
 }
 
@@ -1045,17 +1103,22 @@ fn print_markdown_raw(content: &str, theme: Theme) {
             RefCell::new(bat::PrettyPrinter::new());
     }
     PRINTER.with(|printer| {
-        printer
-            .borrow_mut()
+        let mut printer = printer.borrow_mut();
+        let printer = printer
             .input(bat::Input::from_reader(Box::new(std::io::Cursor::new(
                 content.as_bytes().to_vec(),
             ))))
             .theme(theme.as_str())
             .colored_output(env_no_color())
             .language("Markdown")
-            .wrapping_mode(WrappingMode::NoWrapping(true))
-            .print()
-            .unwrap();
+            .wrapping_mode(WrappingMode::NoWrapping(true));
+        if capturing() {
+            let mut rendered = String::new();
+            printer.print_with_writer(Some(&mut rendered)).unwrap();
+            emit!("{}", rendered);
+        } else {
+            printer.print().unwrap();
+        }
     });
 }
 
@@ -1228,7 +1291,7 @@ const INDENT: &str = "    ";
 
 fn print_value_with_prefix(prefix: &String, value: &Value, debug: bool) {
     let prefix_width = measure_text_width(prefix.as_str());
-    print!("{}", prefix);
+    emit!("{}", prefix);
     print_value(value, debug, prefix_width)
 }
 
@@ -1248,7 +1311,7 @@ fn print_value(value: &Value, debug: bool, reserve_width: usize) {
         Value::Null => style("null".to_string()).dim(),
         _ => unreachable!(),
     };
-    println!("{}", formatted);
+    emitln!("{}", formatted);
 }
 
 fn print_params(value: &Option<JsonObject>, depth: usize, debug: bool) {
@@ -1258,7 +1321,7 @@ fn print_params(value: &Option<JsonObject>, depth: usize, debug: bool) {
         for (key, val) in json_object.iter() {
             match val {
                 Value::Object(obj) => {
-                    println!("{}{}:", indent, style(key).dim());
+                    emitln!("{}{}:", indent, style(key).dim());
                     print_params(&Some(obj.clone()), depth + 1, debug);
                 }
                 Value::Array(arr) => {
@@ -1290,13 +1353,13 @@ fn print_params(value: &Option<JsonObject>, depth: usize, debug: bool) {
                         );
                     } else {
                         // Use the original multi-line format for complex arrays
-                        println!("{}{}:", indent, style(key).dim());
+                        emitln!("{}{}:", indent, style(key).dim());
                         for item in arr.iter() {
                             if let Value::Object(obj) = item {
-                                println!("{}{}- ", indent, INDENT);
+                                emitln!("{}{}- ", indent, INDENT);
                                 print_params(&Some(obj.clone()), depth + 2, debug);
                             } else {
-                                println!("{}{}- {}", indent, INDENT, item);
+                                emitln!("{}{}- {}", indent, INDENT, item);
                             }
                         }
                     }
@@ -1386,8 +1449,8 @@ pub fn display_session_info(
         .unwrap_or_else(|| "unknown".to_string());
 
     // ASCII art goose with session info on the right
-    println!();
-    println!(
+    emitln!();
+    emitln!(
         "  {}  {} {} {} {} {}",
         style("  __( O)>").white(),
         style("●").green(),
@@ -1398,7 +1461,7 @@ pub fn display_session_info(
     );
 
     if let Some(id) = session_id {
-        println!(
+        emitln!(
             "  {}  {} {} {}",
             style(r" \____)").white(),
             style(" ").dim(),
@@ -1406,14 +1469,14 @@ pub fn display_session_info(
             style(format!("· {}", cwd_display)).dim(),
         );
     } else {
-        println!(
+        emitln!(
             "  {}  {} {}",
             style(r" \____)").white(),
             style(" ").dim(),
             style(format!("  {}", cwd_display)).dim(),
         );
     }
-    println!(
+    emitln!(
         "  {}  {}",
         style("   L L").white(),
         style("   goose is ready").white()
@@ -1431,7 +1494,7 @@ fn set_terminal_title() {
     // Sanitize: strip control characters (ESC, BEL, etc.) to prevent terminal escape injection
     let sanitized: String = dir_name.chars().filter(|c| !c.is_control()).collect();
     // OSC 0 sets the terminal window/tab title
-    print!("\x1b]0;🪿 {}\x07", sanitized);
+    emit!("\x1b]0;🪿 {}\x07", sanitized);
     let _ = std::io::stdout().flush();
 }
 
@@ -1439,7 +1502,7 @@ pub fn display_context_usage(total_tokens: usize, context_limit: usize) {
     use console::style;
 
     if context_limit == 0 {
-        println!(
+        emitln!(
             "  {}",
             style("context usage unavailable (context limit is 0)").dim()
         );
@@ -1472,7 +1535,7 @@ pub fn display_context_usage(total_tokens: usize, context_limit: usize) {
         }
     }
 
-    println!(
+    emitln!(
         "  {} {} {}",
         colored_bar,
         style(format!("{}%", percentage)).dim(),
@@ -1534,6 +1597,9 @@ impl McpSpinners {
     }
 
     pub fn log(&mut self, message: &str) {
+        if capturing() {
+            return;
+        }
         let spinner = self.log_spinner.get_or_insert_with(|| {
             let bar = self.multi_bar.add(
                 ProgressBar::new_spinner()
@@ -1559,6 +1625,9 @@ impl McpSpinners {
     }
 
     pub fn update(&mut self, token: &str, value: f64, total: Option<f64>, message: Option<&str>) {
+        if capturing() {
+            return;
+        }
         let bar = self.bars.entry(token.to_string()).or_insert_with(|| {
             if let Some(total) = total {
                 self.multi_bar.add(
