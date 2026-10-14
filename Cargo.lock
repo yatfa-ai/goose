@@ -5349,6 +5349,7 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "gloo-timers",
+ "image 0.24.9",
  "once_cell",
  "rand 0.10.2",
  "regex",
