@@ -5507,6 +5507,7 @@ dependencies = [
  "chrono",
  "env-lock",
  "futures",
+ "image 0.24.9",
  "once_cell",
  "rand 0.10.2",
  "regex",
