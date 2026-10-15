@@ -1846,6 +1846,7 @@ async fn handle_serve_command(args: ServeCommandArgs) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
     let secret_key = env_secret.unwrap_or_else(generate_serve_secret_key);
+    #[cfg(feature = "scheduler")]
     if let Err(error) = server.start_scheduler().await {
         warn!("Scheduler failed to start; scheduled jobs will not run until a client connects: {error}");
     }
