@@ -254,6 +254,11 @@ pub struct CliSession {
     /// run-side ACP server (`GOOSE_RUN_SERVE_ACP_PORT`). `None` for a plain
     /// interactive run with no serve-on-run.
     acp_turn_rx: Option<tokio::sync::mpsc::UnboundedReceiver<goose::acp::AcpTurnEvent>>,
+    /// Other direction of the same seam: where this session publishes the turns
+    /// its human types, so clients attached over the run-side ACP server see
+    /// them instead of a session that appears to stall whenever the operator
+    /// takes over. `None` without serve-on-run.
+    pane_turns: Option<goose::acp::PaneTurnPublisher>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,6 +346,7 @@ impl CliSession {
             extension_loading,
             loading_announced: false,
             acp_turn_rx: None,
+            pane_turns: None,
         }
     }
 
@@ -352,6 +358,23 @@ impl CliSession {
         rx: Option<tokio::sync::mpsc::UnboundedReceiver<goose::acp::AcpTurnEvent>>,
     ) {
         self.acp_turn_rx = rx;
+    }
+
+    pub fn set_pane_turns(&mut self, publisher: Option<goose::acp::PaneTurnPublisher>) {
+        self.pane_turns = publisher;
+    }
+
+    /// Publish one event of a locally-typed turn to attached ACP clients.
+    ///
+    /// A send failure means nobody is attached, which is the ordinary case for
+    /// an interactive run and not worth reporting.
+    fn publish_pane_turn(&self, event: &AgentEvent) {
+        if let Some(publisher) = &self.pane_turns {
+            let _ = publisher.send(goose::acp::PaneTurnEvent {
+                session_id: self.session_id.clone(),
+                event: std::sync::Arc::new(event.clone()),
+            });
+        }
     }
 
     pub fn session_id(&self) -> &String {
@@ -1350,6 +1373,11 @@ impl CliSession {
             .messages
             .last()
             .ok_or_else(|| anyhow::anyhow!("No user message"))?;
+        // The human's own line opens the turn for attached clients: the reply
+        // stream carries only what the agent produces, so without this a client
+        // would see an answer to a question it never saw asked.
+        self.publish_pane_turn(&AgentEvent::Message(user_message.clone()));
+
         let cancel_token_interrupt = cancel_token.clone();
         let handle = tokio::spawn(async move {
             if ctrl_c().await.is_ok() {
@@ -1383,6 +1411,9 @@ impl CliSession {
         loop {
             tokio::select! {
                 result = stream.next() => {
+                    if let Some(Ok(event)) = &result {
+                        self.publish_pane_turn(event);
+                    }
                     match result {
                         Some(Ok(AgentEvent::Message(message))) => {
                             if first_token_at.is_none() && message_has_text(&message) {

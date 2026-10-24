@@ -23,6 +23,7 @@ impl HandleDispatchFrom<Client> for GooseAcpHandler {
             // connection; the result is ignored on later requests.
             let _ = agent.client_cx.set(cx.clone());
             agent.start_thinking_effort_update_forwarder(&cx).await;
+            agent.start_pane_turn_forwarder(&cx).await;
 
             // InitializeRequest runs inline: it sets connection-scoped state
             // (client fs/terminal capabilities) that later handlers read with

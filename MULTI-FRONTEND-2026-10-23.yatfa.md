@@ -196,6 +196,94 @@ Not yet exercised: the permission answer and Ctrl+C **through the client** (both
 protocol level in `run3.sh`, neither driven through this code path). Rendering is flat — no
 markdown, themes or spinners.
 
+## Built 2026-10-24 — the complete path, across three repos
+
+The decision taken: an interface that shows *almost* everything is not worth
+having, so pane-typed turns are published to the socket rather than left
+invisible. That makes the browser complete **without** removing the pane, and it
+leaves "remove the pane" as a separate decision rather than a prerequisite.
+
+### goose — pane turns reach attached clients (branch `attach-client`)
+
+`crates/goose/src/acp/pane_turn.rs` is the mirror of `turn_event.rs` in the
+other direction. `goose run` publishes its own reply stream on a broadcast; each
+live ACP connection subscribes and forwards what it sees to its client, for
+sessions that connection has loaded.
+
+Deliberately notification-only: it registers no permission, mints no run id and
+touches no session state. The pane owns its turn — it is already prompting its
+human and already persisting the conversation — so a forwarder doing any of that
+would be a second owner racing the first. Measured consequence, and the right
+one: a pane-driven tool in `approve` mode pauses on the pane's own prompt while
+the client watches the call sit pending.
+
+The translation reuses the server's own converters
+(`tool_calls::conversion`, `tool_notifications`) rather than a second copy, so a
+forwarded turn is shaped exactly like a socket-driven one. Visibility of those
+two modules was widened from `pub(super)` to `pub(crate)`; nothing else in the
+ACP server changed.
+
+Measured with `~/mf-probe/run.sh`, the acceptance criterion written above:
+
+| turn | before | after |
+|---|---|---|
+| typed in the pane, passive client | **0 frames** | `user_message_chunk` + 7 `agent_message_chunk` |
+| typed in the pane, with a tool | — | `tool_call` + **6** `tool_call_update` (live output, one per second) |
+| driven by ACP client A, passive client B | 0 frames | still 0 — the socket→socket half of #10130, out of scope |
+
+The remaining zero is deliberate: in the fleet the bridge holds the only ACP
+connection, so socket→socket visibility buys nothing. An attach client that
+drives its own turns is the case that would need it.
+
+### agent-bridge — the event leg (branch `event-leg`, repo `yatfa-agent`)
+
+`cmd/agent-bridge/event_leg.go`: the ACP read loop's `session/update` stream is
+kept, numbered under the same per-process seq and boot generation the raw leg
+uses, held in a 1 MiB ring, and published as `agent_event` frames on the
+AgentChannel. The ACP setup was extracted so the leg connects at boot instead of
+waiting for the first dispatch — `session/load` then seeds the ring with history.
+
+Inert unless `YATFA_AGENT_EVENTS` is set. That is the property the rest of the
+fleet relies on: the outbound cable write lives on a 500 ms budget with a
+reconnect watchdog, and a real frame reached 86 KiB, so an un-opted agent pays
+one atomic load per notification and nothing else. Five Go tests cover the gate,
+retention when a send fails, and retention before the control socket exists.
+
+### yatfa — the structured page (branch `session-events-page`, repo `yatfa`)
+
+`/terminals/:agent_id/events`, a sibling of the terminal workspace, which is
+untouched. `AgentChannel` relays `agent_event` the way it relays raw chunks;
+frames are split for the broker's ~8 KB NOTIFY ceiling (a history frame measured
+86 KiB) and the client applies an event only once every part has arrived. A
+replay answer is relayed one frame per event, bounded at 500, and closed by an
+envelope naming the ring's span.
+
+Writing reuses `POST /terminals/:agent_id/input`, whose payload a goose agent
+already receives as a conversational turn over ACP — so the page adds **no write
+surface and no new authorization question**. Interrupt remains the existing
+signal verb.
+
+10 channel specs, 5 request specs, 11 jest specs (part reassembly, gap
+re-request, generation replacement, rendering, composer). The whole existing
+channel suite (316 + 286 examples) still passes.
+
+### What is NOT done, and why
+
+- **The engine is still `goose run`.** Switching it to `goose serve` and deleting
+  the PTY leg needs a goose release into the sandbox image — a `git push` and a
+  `GOOSE_FORK_TAG` bump — which is yours to authorize. Parity for that switch is
+  measured above; the one gap (`GOOSE_SYSTEM_PROMPT_FILE_PATH` is CLI-only) has a
+  better replacement already working, `_goose/unstable/session/system-prompt/set`,
+  and that work belongs to the bridge.
+- **Nothing is pushed.** Three branches exist locally, in three repos.
+- **The end-to-end chain was verified hop by hop, not in one running fleet**:
+  goose→client and goose→browser live (local, and on `yatfa-planner-2` for the
+  read path), bridge→server by its own tests and the channel specs that feed the
+  exact frames the bridge emits. A single live run through Rails needs the
+  engine flip above.
+- The browser page's rendering is first-draft; `goose attach`'s rendering is
+  still flat (no markdown, themes or spinners).
+
 ## The option that changes the plan: no TUI at all
 
 Everything above assumes the pane stays. If the browser becomes the *only* human surface, the

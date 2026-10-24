@@ -126,8 +126,8 @@ mod resources;
 mod schedule;
 mod slash_commands;
 mod sources;
-mod tool_calls;
-mod tool_notifications;
+pub(crate) mod tool_calls;
+pub(crate) mod tool_notifications;
 mod tools;
 
 pub type AcpProviderFactory = Arc<
@@ -322,6 +322,9 @@ pub struct GooseAcpAgentOptions {
     /// a run-side ACP server. When set, every turn processed by this agent is
     /// duplicated onto the channel so the owning TUI can render it.
     pub event_tap: Option<crate::acp::AcpTurnTap>,
+    /// Other direction of the same seam: turns the pane's human typed, which
+    /// this connection forwards to its client. See `acp::pane_turn`.
+    pub pane_turns: Option<crate::acp::PaneTurnPublisher>,
 }
 
 pub struct GooseAcpAgent {
@@ -341,6 +344,8 @@ pub struct GooseAcpAgent {
     client_requests_tool_call_label_enrichment: OnceCell<bool>,
     use_login_shell_path: OnceCell<bool>,
     client_cx: OnceCell<ConnectionTo<Client>>,
+    pane_turns: Option<crate::acp::PaneTurnPublisher>,
+    pane_turn_forwarder: OnceCell<()>,
     thinking_effort_update_tx: mpsc::UnboundedSender<String>,
     thinking_effort_update_rx: Mutex<Option<mpsc::UnboundedReceiver<String>>>,
     config_dir: std::path::PathBuf,
@@ -1025,6 +1030,8 @@ impl GooseAcpAgent {
             client_requests_tool_call_label_enrichment: OnceCell::new(),
             use_login_shell_path: OnceCell::new(),
             client_cx: OnceCell::new(),
+            pane_turns: options.pane_turns,
+            pane_turn_forwarder: OnceCell::new(),
             thinking_effort_update_tx,
             thinking_effort_update_rx: Mutex::new(Some(thinking_effort_update_rx)),
             config_dir: options.config_dir,
@@ -1337,6 +1344,61 @@ impl GooseAcpAgent {
                             ?error,
                             "Failed to build thinking-effort config update"
                         );
+                    }
+                }
+            }
+        });
+    }
+
+    /// Forward turns typed in the owning pane to this connection's client.
+    ///
+    /// Without this a locally-typed turn is invisible to every attached client
+    /// (upstream #10130): notifications are sent through the connection serving
+    /// a request, and a human typing in the terminal is serving none. The
+    /// forwarder sends notifications and nothing else — the pane owns that
+    /// turn, including its approvals and its persistence.
+    ///
+    /// Only sessions this connection has loaded are forwarded, so a client is
+    /// never told about a session it never asked for.
+    async fn start_pane_turn_forwarder(self: &Arc<Self>, cx: &ConnectionTo<Client>) {
+        let Some(publisher) = self.pane_turns.as_ref() else {
+            return;
+        };
+        if self.pane_turn_forwarder.set(()).is_err() {
+            return;
+        }
+
+        let mut turns = publisher.subscribe();
+        let agent = Arc::downgrade(self);
+        let cx = cx.clone();
+        tokio::spawn(async move {
+            let mut tool_requests = HashMap::new();
+            loop {
+                let event = match turns.recv().await {
+                    Ok(event) => event,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                        warn!(
+                            missed,
+                            "pane turn forwarder fell behind; events were dropped"
+                        );
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
+                let Some(agent) = agent.upgrade() else {
+                    break;
+                };
+                if !agent.has_session(&event.session_id).await {
+                    continue;
+                }
+                for update in
+                    crate::acp::pane_turn::pane_turn_updates(&event.event, &mut tool_requests)
+                {
+                    if let Err(error) = cx.send_notification(
+                        crate::acp::pane_turn::pane_turn_notification(&event.session_id, update),
+                    ) {
+                        warn!(%error, "Failed to forward a pane turn to the client");
+                        return;
                     }
                 }
             }
@@ -2804,6 +2866,7 @@ pub async fn run(builtins: Vec<String>, enable_scheduler: bool) -> Result<()> {
             enable_scheduler,
             agent_manager: None,
             event_tap: None,
+            pane_turns: None,
         },
     );
     let agent = server.create_agent().await?;
@@ -3755,6 +3818,7 @@ print(\"hello, world\")
             live_voice,
             agent_manager: None,
             event_tap: None,
+            pane_turns: None,
         })
         .await
         .unwrap();
@@ -3891,6 +3955,7 @@ print(\"hello, world\")
                 live_voice,
                 agent_manager: None,
                 event_tap: None,
+                pane_turns: None,
             })
             .await
             .unwrap(),

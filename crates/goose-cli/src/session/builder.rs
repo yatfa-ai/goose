@@ -895,8 +895,10 @@ pub async fn build_session(session_config: SessionBuilderConfig) -> CliSession {
 
     #[cfg(feature = "acp-http")]
     {
-        let acp_turn_rx = maybe_serve_acp_on_run(Arc::clone(&agent_ptr), &session_id).await;
+        let (acp_turn_rx, pane_turns) =
+            maybe_serve_acp_on_run(Arc::clone(&agent_ptr), &session_id).await;
         session.set_acp_turn_rx(acp_turn_rx);
+        session.set_pane_turns(pane_turns);
     }
 
     session
@@ -916,7 +918,10 @@ pub async fn build_session(session_config: SessionBuilderConfig) -> CliSession {
 async fn maybe_serve_acp_on_run(
     agent: Arc<Agent>,
     session_id: &str,
-) -> Option<tokio::sync::mpsc::UnboundedReceiver<goose::acp::AcpTurnEvent>> {
+) -> (
+    Option<tokio::sync::mpsc::UnboundedReceiver<goose::acp::AcpTurnEvent>>,
+    Option<goose::acp::PaneTurnPublisher>,
+) {
     use goose::acp::server::AcpBuiltinSelection;
     use goose::acp::server_factory::{AcpServer, AcpServerFactoryConfig};
     use goose::agents::AgentConfig;
@@ -927,7 +932,7 @@ async fn maybe_serve_acp_on_run(
 
     let port = match std::env::var("GOOSE_RUN_SERVE_ACP_PORT") {
         Ok(raw) => raw.trim().to_string(),
-        Err(_) => return None,
+        Err(_) => return (None, None),
     };
     let port: u16 = match port.parse() {
         Ok(p) => p,
@@ -935,7 +940,7 @@ async fn maybe_serve_acp_on_run(
             eprintln!(
                 "GOOSE_RUN_SERVE_ACP_PORT={port:?} is not a valid port; ACP server not started"
             );
-            return None;
+            return (None, None);
         }
     };
 
@@ -952,7 +957,7 @@ async fn maybe_serve_acp_on_run(
         Ok(m) => Arc::new(m),
         Err(e) => {
             eprintln!("Failed to build AgentManager for run-side ACP server: {e}");
-            return None;
+            return (None, None);
         }
     };
     manager
@@ -966,6 +971,12 @@ async fn maybe_serve_acp_on_run(
     let (event_tap_tx, event_tap_rx) =
         tokio::sync::mpsc::unbounded_channel::<goose::acp::AcpTurnEvent>();
 
+    // The opposite direction: turns typed in this pane, which each ACP
+    // connection forwards to its own client. Bounded — a client that cannot
+    // keep up with a live view loses the oldest events and is told so, rather
+    // than growing a queue behind the terminal's render loop.
+    let (pane_turn_tx, _) = tokio::sync::broadcast::channel(1024);
+
     let server = Arc::new(AcpServer::new(AcpServerFactoryConfig {
         builtins: AcpBuiltinSelection {
             defaults: vec!["developer".to_string()],
@@ -978,6 +989,7 @@ async fn maybe_serve_acp_on_run(
         enable_scheduler: false,
         agent_manager: Some(manager),
         event_tap: Some(event_tap_tx),
+        pane_turns: Some(pane_turn_tx.clone()),
     }));
 
     let secret_key = std::env::var("GOOSE_SERVER__SECRET_KEY")
@@ -1014,7 +1026,7 @@ async fn maybe_serve_acp_on_run(
         .await;
     });
 
-    Some(event_tap_rx)
+    (Some(event_tap_rx), Some(pane_turn_tx))
 }
 
 fn is_provider_unavailable_error(e: &anyhow::Error) -> bool {

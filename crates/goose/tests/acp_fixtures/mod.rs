@@ -410,6 +410,7 @@ pub async fn spawn_acp_server_in_process(
         live_voice,
         agent_manager: None,
         event_tap: None,
+        pane_turns: None,
     })
     .await
     .unwrap();

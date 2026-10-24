@@ -35,6 +35,9 @@ pub struct AcpServerFactoryConfig {
     /// duplicated onto this channel so the owning TUI can render it. `None`
     /// for plain `goose serve` — behavior is identical to upstream.
     pub event_tap: Option<AcpTurnTap>,
+    /// Set by the same interactive `goose run`: the channel its TUI publishes
+    /// locally-typed turns on, which each connection forwards to its client.
+    pub pane_turns: Option<crate::acp::PaneTurnPublisher>,
 }
 
 pub struct AcpServer {
@@ -156,6 +159,7 @@ impl AcpServer {
             live_voice: self.live_voice.clone(),
             agent_manager: self.config.agent_manager.clone(),
             event_tap: self.config.event_tap.clone(),
+            pane_turns: self.config.pane_turns.clone(),
         })
         .await?;
         info!("Created new ACP agent");
@@ -196,6 +200,7 @@ mod tests {
                 enable_scheduler,
                 agent_manager: None,
                 event_tap: None,
+                pane_turns: None,
             },
             data_dir,
         )

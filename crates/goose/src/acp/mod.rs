@@ -3,6 +3,7 @@ pub(crate) mod fs;
 mod handoff;
 #[cfg(feature = "acp-http")]
 mod mcp_app_proxy;
+pub mod pane_turn;
 mod provider;
 mod response_builder;
 pub mod server;
@@ -13,6 +14,7 @@ pub(crate) mod tools;
 pub mod transport;
 pub mod turn_event;
 
+pub use pane_turn::{PaneTurnEvent, PaneTurnPublisher};
 pub use turn_event::{AcpTurnEvent, AcpTurnTap};
 
 pub use common::{map_permission_response, PermissionDecision};
