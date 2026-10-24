@@ -393,6 +393,7 @@ mod tests {
             agent_manager: None,
             event_tap: None,
             pane_turns: None,
+            live_session_id: None,
         });
         let agent = server.create_agent().await.unwrap();
 
@@ -433,6 +434,7 @@ mod tests {
             agent_manager: None,
             event_tap: None,
             pane_turns: None,
+            live_session_id: None,
         });
         let agent = server.create_agent().await.unwrap();
 

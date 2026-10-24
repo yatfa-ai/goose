@@ -325,6 +325,9 @@ pub struct GooseAcpAgentOptions {
     /// Other direction of the same seam: turns the pane's human typed, which
     /// this connection forwards to its client. See `acp::pane_turn`.
     pub pane_turns: Option<crate::acp::PaneTurnPublisher>,
+    /// Session the external owner registered its agent under. See
+    /// `on_list_sessions`.
+    pub live_session_id: Option<String>,
 }
 
 pub struct GooseAcpAgent {
@@ -346,6 +349,7 @@ pub struct GooseAcpAgent {
     client_cx: OnceCell<ConnectionTo<Client>>,
     pane_turns: Option<crate::acp::PaneTurnPublisher>,
     pane_turn_forwarder: OnceCell<()>,
+    pub(super) live_session_id: Option<String>,
     thinking_effort_update_tx: mpsc::UnboundedSender<String>,
     thinking_effort_update_rx: Mutex<Option<mpsc::UnboundedReceiver<String>>>,
     config_dir: std::path::PathBuf,
@@ -1032,6 +1036,7 @@ impl GooseAcpAgent {
             client_cx: OnceCell::new(),
             pane_turns: options.pane_turns,
             pane_turn_forwarder: OnceCell::new(),
+            live_session_id: options.live_session_id,
             thinking_effort_update_tx,
             thinking_effort_update_rx: Mutex::new(Some(thinking_effort_update_rx)),
             config_dir: options.config_dir,
@@ -2867,6 +2872,7 @@ pub async fn run(builtins: Vec<String>, enable_scheduler: bool) -> Result<()> {
             agent_manager: None,
             event_tap: None,
             pane_turns: None,
+            live_session_id: None,
         },
     );
     let agent = server.create_agent().await?;
@@ -3819,6 +3825,7 @@ print(\"hello, world\")
             agent_manager: None,
             event_tap: None,
             pane_turns: None,
+            live_session_id: None,
         })
         .await
         .unwrap();
@@ -3956,6 +3963,7 @@ print(\"hello, world\")
                 agent_manager: None,
                 event_tap: None,
                 pane_turns: None,
+                live_session_id: None,
             })
             .await
             .unwrap(),

@@ -38,6 +38,9 @@ pub struct AcpServerFactoryConfig {
     /// Set by the same interactive `goose run`: the channel its TUI publishes
     /// locally-typed turns on, which each connection forwards to its client.
     pub pane_turns: Option<crate::acp::PaneTurnPublisher>,
+    /// The session that `goose run` registered its agent under, so a client can
+    /// find the session to attach to. See `on_list_sessions`.
+    pub live_session_id: Option<String>,
 }
 
 pub struct AcpServer {
@@ -160,6 +163,7 @@ impl AcpServer {
             agent_manager: self.config.agent_manager.clone(),
             event_tap: self.config.event_tap.clone(),
             pane_turns: self.config.pane_turns.clone(),
+            live_session_id: self.config.live_session_id.clone(),
         })
         .await?;
         info!("Created new ACP agent");
@@ -201,6 +205,7 @@ mod tests {
                 agent_manager: None,
                 event_tap: None,
                 pane_turns: None,
+                live_session_id: None,
             },
             data_dir,
         )

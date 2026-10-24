@@ -411,6 +411,7 @@ pub async fn spawn_acp_server_in_process(
         agent_manager: None,
         event_tap: None,
         pane_turns: None,
+        live_session_id: None,
     })
     .await
     .unwrap();

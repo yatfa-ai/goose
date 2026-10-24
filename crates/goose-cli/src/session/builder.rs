@@ -990,6 +990,7 @@ async fn maybe_serve_acp_on_run(
         agent_manager: Some(manager),
         event_tap: Some(event_tap_tx),
         pane_turns: Some(pane_turn_tx.clone()),
+        live_session_id: Some(session_id.to_string()),
     }));
 
     let secret_key = std::env::var("GOOSE_SERVER__SECRET_KEY")
