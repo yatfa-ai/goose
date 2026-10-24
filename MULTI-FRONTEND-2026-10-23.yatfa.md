@@ -284,6 +284,57 @@ channel suite (316 + 286 examples) still passes.
 - The browser page's rendering is first-draft; `goose attach`'s rendering is
   still flat (no markdown, themes or spinners).
 
+## Prod trial 2026-10-24/25 — `yatfa-planner-2`, and the session split it exposed
+
+Both patched binaries were installed on one idle prod planner through the
+per-agent `env:` dev override (`YATFA_GOOSE_URL`, `YATFA_AGENT_BRIDGE_URL`,
+`YATFA_AGENT_EVENTS=1`), which needs no release, no pin bump and no image
+rebuild. No other agent was touched.
+
+First run — **the forward path works, and nobody was listening.** A turn typed
+in the pane reached a separately attached ACP client (`goose attach`) live. The
+bridge saw none of it: it was attached to `20261024_2`, a session it had created
+itself, while the pane drove `20261024_1`.
+
+The cause is a one-second race with a permanent consequence. `goose run` writes its
+session row, then starts the ACP server; the bridge asks `session/list` with
+`only_sessions_with_messages: true` — correct for a session picker, wrong for
+"what can I attach to", because a zero-turn boot recipe has no messages yet. The
+list came back empty, the bridge fell back to `session/new`, and from then on the
+dispatcher and the human were in two different conversations in one process. The
+mirror case is worse: with leftovers present, newest-wins can pin a dead one.
+
+Fixed on both sides, and the fix is what the engine knows that the client cannot
+guess:
+
+- goose (`acp/server/list_sessions.rs`) lists the session the run registered its
+  agent under even while it is empty, and marks it `_meta.live: true` either way.
+  Injected on the first unfiltered page only; `live_session_id` is `None` for
+  plain `goose serve`, so the list is byte-for-byte upstream's.
+- agent-bridge (`acp_dispatch.go`) prefers a `live` session over both its sticky
+  pin and the newest-wins scan, and logs when it moves off a stale pin. An engine
+  that does not send the flag resolves exactly as before.
+
+Second run, observed in the pane and in `/tmp/agent-bridge-events.log`:
+
+```
+[BRIDGE] acp session/list raw result: … "sessionId":"20261024_3" … "messageCount":0 … "live":true …
+[BRIDGE] acp session/load OK id=20261024_3
+event leg: subscribed to session 20261024_3 (ring 0..0)
+```
+
+Then, in that one session: a pane-typed turn appeared in an attached client
+(`two clients one pane ok.`), and a client-sent turn appeared in the pane as
+`dispatcher ▸ … / mirror ok.` One agent, one conversation, two frontends, on
+prod. Bridge status stayed `✅`, zero event-leg write failures, display leg
+`failed=0`.
+
+**Inferred, not observed:** that each forwarded notification landed in the event
+leg's ring. The leg logs subscription and failures only, and the consumer that
+would show the frames — `/terminals/:id/events` — is not deployed. Delivery to
+the bridge's connection is observed (same session, same build, a second client
+on it saw the frames); the ring append is covered by its Go tests.
+
 ## The option that changes the plan: no TUI at all
 
 Everything above assumes the pane stays. If the browser becomes the *only* human surface, the
