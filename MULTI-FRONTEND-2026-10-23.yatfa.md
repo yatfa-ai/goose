@@ -335,6 +335,38 @@ would show the frames — `/terminals/:id/events` — is not deployed. Delivery 
 the bridge's connection is observed (same session, same build, a second client
 on it saw the frames); the ring append is covered by its Go tests.
 
+## Mid-turn steer — MEASURED 2026-10-25 in prod on `yatfa-planner-2`
+
+Stage 5's input path, shipped and measured: a line a human sends from the page
+is injected into the turn in flight with `_goose/unstable/session/steer`
+(bridge `acp_steer.go`; the server marks the frame `steer_when_busy: true`, the
+dispatcher's frames never carry it). Three runs, each with the bridge's own
+witness line in `/tmp/agent-bridge-events.log`:
+
+| turn shape | line sent | goose accepted the steer | model saw it | old behaviour |
+|---|---|---|---|---|
+| 25s blocking shell call | t+13.1s | t+13.1s (`queuedSteer` meta) | t+44.7s, right after the tool returned | a NEW run after t+47.7s |
+| streaming a 300-word answer | t+8.0s | t+8.0s | t+9.2s, replied t+10.6s | a NEW run after t+12.4s |
+| 12s shell call, sent through `AgentMessenger#send_input!` | t+8.0s | t+8.0s | same run, pane shows the line then the reply | a NEW run |
+
+**The acceptance is immediate; the model sees it at the next agent-loop
+boundary.** A steer taken while a tool is running waits for that tool, because
+the model is not running either — so that boundary is the earliest point the
+line could possibly be read, not a limitation to fix. The wall-clock saving on
+a tool-bound turn is therefore small (~3s of the 31s); what the steer actually
+buys is that the line lands **inside the running turn**, with its context, as
+one conversation instead of two.
+
+Three things were confirmed as side effects. `session_info_update` carries
+`_meta.goose.queuedSteer = {messageId, runId}` while the steer waits — an
+update with no `activeRunId` key, which is exactly why the page reads that key's
+presence rather than its value. Duplicate frames seen on the relay are
+`replay: true` answers to a viewer's hole request, broadcast to the agent's
+whole stream; the page's seq watermark drops them, so the amplification is
+traffic, not a rendering fault. And NOTIFY delivery is genuinely out of order
+(seq 199 arrived before 192), which is what the hole grace and the one-request-
+per-hole rule in `agent_event_stream_controller.js` exist for.
+
 ## The option that changes the plan: no TUI at all
 
 Everything above assumes the pane stays. If the browser becomes the *only* human surface, the
