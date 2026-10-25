@@ -72,10 +72,16 @@ where
     });
 }
 
-/// Render one mirror tick so a dispatcher turn reads like a chat: the prompt as
+/// Render one mirror tick so an ACP-driven turn reads like a chat: the prompt as
 /// a compact header, the reply through the same path as a user-typed turn.
 /// Read-only — it never touches the agent or session state, so it cannot
 /// interfere with the live ACP reply the bridge is already receiving.
+///
+/// The prompt header carries NO attribution. `session/prompt` says nothing about
+/// who wrote it, and the same client that steers a session on a scheduler's
+/// behalf also forwards what a human typed into a web terminal, so naming the
+/// writer here would be a guess — and the guess reads as a fact to the operator
+/// watching the pane. Attribution has to arrive with the prompt or not at all.
 fn render(
     event: AcpTurnEvent,
     markdown_buffer: &mut streaming_buffer::MarkdownBuffer,
@@ -90,7 +96,7 @@ fn render(
             let trimmed = text.trim_end();
             if !trimmed.is_empty() {
                 output::render_text("", None, false);
-                output::render_text(&format!("dispatcher ▸ {trimmed}"), Some(Color::Cyan), false);
+                output::render_text(&format!("▸ {trimmed}"), Some(Color::Cyan), false);
             }
         }
         AcpTurnEvent::StreamEvent(tick) => match *tick {
