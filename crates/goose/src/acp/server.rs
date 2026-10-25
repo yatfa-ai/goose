@@ -1410,6 +1410,19 @@ impl GooseAcpAgent {
         });
     }
 
+    /// The prompt that opens a turn is the one message the reply stream never
+    /// carries, so a client watching the session — rather than the one that sent
+    /// the prompt — sees an answer to a question it never saw asked. Steers need
+    /// no equivalent: the agent yields those into the stream itself.
+    fn publish_socket_turn(&self, session_id: &str, message: &Message) {
+        if let Some(publisher) = self.pane_turns.as_ref() {
+            let _ = publisher.send(crate::acp::PaneTurnEvent {
+                session_id: session_id.to_string(),
+                event: Arc::new(crate::agents::AgentEvent::Message(message.clone())),
+            });
+        }
+    }
+
     async fn activate_acp_session(
         &self,
         cx: &ConnectionTo<Client>,
@@ -2444,6 +2457,7 @@ impl GooseAcpAgent {
             session_id: session_id.clone(),
             text: prompt_text,
         });
+        self.publish_socket_turn(&session_id, &user_message);
 
         let use_state_machine = use_state_machine_from_meta(args.meta.as_ref());
         let session_config = SessionConfig {

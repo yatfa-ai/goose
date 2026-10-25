@@ -9,7 +9,10 @@
 //! sees a session that appears to stop whenever the human takes over.
 //!
 //! `goose run` publishes its own reply stream here; each live ACP connection
-//! subscribes and forwards what it sees to its client.
+//! subscribes and forwards what it sees to its client. The socket side
+//! publishes one thing too: the prompt that opens a turn, which the reply
+//! stream never carries, so a client watching the session sees the question as
+//! well as the answer.
 //!
 //! DELIBERATELY NOTIFICATION-ONLY. The translation below produces
 //! `SessionUpdate`s and nothing else: it registers no pending permission, mints
