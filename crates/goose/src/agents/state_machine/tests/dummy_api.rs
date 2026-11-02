@@ -10,8 +10,8 @@ pub(super) struct ProviderFeatures {
     pub(super) reports_usage: bool,
     pub(super) preserves_thinking: bool,
     pub(super) resolved_model: Option<&'static str>,
-    pub(super) cache_read_tokens: Option<i32>,
-    pub(super) cache_write_tokens: Option<i32>,
+    pub(super) cache_read_tokens: Option<i64>,
+    pub(super) cache_write_tokens: Option<i64>,
     pub(super) manages_own_context: bool,
 }
 
@@ -139,7 +139,7 @@ pub(super) struct ApiCall {
 }
 
 impl ApiCall {
-    pub(super) fn input_tokens(&self) -> i32 {
+    pub(super) fn input_tokens(&self) -> i64 {
         serialized_chars(&self.body)
     }
 
@@ -475,7 +475,7 @@ impl DummyApiState {
             "chatcmpl-test-{}",
             self.next_response_id.fetch_add(1, Ordering::Relaxed)
         );
-        let meta = |output_tokens: i32| ResponseMeta {
+        let meta = |output_tokens: i64| ResponseMeta {
             id: &id,
             model,
             input_tokens,
@@ -486,14 +486,14 @@ impl DummyApiState {
         };
         match response {
             ApiResponse::Reply(text) => sse_response(reply_events(
-                &meta(text.chars().count() as i32),
+                &meta(text.chars().count() as i64),
                 &text,
                 None,
             )),
             ApiResponse::ReplyWithDistinctIds(chunks) => {
                 let output_tokens: usize = chunks.iter().map(|chunk| chunk.chars().count()).sum();
                 sse_response(reply_events_with_distinct_ids(
-                    &meta(output_tokens as i32),
+                    &meta(output_tokens as i64),
                     &chunks,
                 ))
             }
@@ -505,7 +505,7 @@ impl DummyApiState {
                 if require_advertised {
                     assert_tool_advertised(&body, &name);
                 }
-                let output_tokens = name.chars().count() as i32 + arguments.chars().count() as i32;
+                let output_tokens = name.chars().count() as i64 + arguments.chars().count() as i64;
                 sse_response(tool_call_events(&meta(output_tokens), &name, &arguments))
             }
             ApiResponse::ToolCalls(calls) => {
@@ -515,7 +515,7 @@ impl DummyApiState {
                 let output_tokens = calls
                     .iter()
                     .map(|call| call.name.chars().count() + call.arguments.chars().count())
-                    .sum::<usize>() as i32;
+                    .sum::<usize>() as i64;
                 sse_response(tool_calls_events(&meta(output_tokens), &calls))
             }
             ApiResponse::Mixed {
@@ -537,7 +537,7 @@ impl DummyApiState {
                         .map(|call| call.name.chars().count() + call.arguments.chars().count())
                         .unwrap_or_default();
                 sse_response(mixed_events(
-                    &meta(output_tokens as i32),
+                    &meta(output_tokens as i64),
                     &reasoning,
                     text.as_deref(),
                     call.as_ref(),
@@ -553,7 +553,7 @@ impl DummyApiState {
             }
             ApiResponse::EmptyServerError => ResponseTemplate::new(500),
             ApiResponse::ReplyThenServerError { reply, error } => sse_response(reply_events(
-                &meta(reply.chars().count() as i32),
+                &meta(reply.chars().count() as i64),
                 &reply,
                 Some(&error),
             )),
@@ -574,11 +574,11 @@ fn assert_tool_advertised(body: &Value, name: &str) {
     );
 }
 
-fn serialized_chars(value: &Value) -> i32 {
-    value.to_string().chars().count() as i32
+fn serialized_chars(value: &Value) -> i64 {
+    value.to_string().chars().count() as i64
 }
 
-fn context_limit_response(input_tokens: i32, context_limit: usize) -> ResponseTemplate {
+fn context_limit_response(input_tokens: i64, context_limit: usize) -> ResponseTemplate {
     ResponseTemplate::new(400).set_body_json(context_limit_error(format!(
         "This model's maximum context length is {context_limit} tokens, but the request contains {input_tokens} tokens"
     )))
@@ -640,11 +640,11 @@ fn collect_strings<'a>(value: &'a Value, strings: &mut Vec<&'a str>) {
 struct ResponseMeta<'a> {
     id: &'a str,
     model: &'a str,
-    input_tokens: i32,
-    output_tokens: i32,
+    input_tokens: i64,
+    output_tokens: i64,
     include_usage: bool,
-    cache_read_tokens: Option<i32>,
-    cache_write_tokens: Option<i32>,
+    cache_read_tokens: Option<i64>,
+    cache_write_tokens: Option<i64>,
 }
 
 fn reply_events(meta: &ResponseMeta, text: &str, error: Option<&str>) -> String {

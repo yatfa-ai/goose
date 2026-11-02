@@ -352,7 +352,7 @@ impl AppsManagerClient {
         .await?;
 
         if let (Some(output), Some(max)) = (usage.usage.output_tokens, model_config.max_tokens) {
-            if output >= max {
+            if output >= i64::from(max) {
                 return Err("App content generation was truncated because the response hit the token limit. Try simplifying your app description.".to_string());
             }
         }
@@ -401,7 +401,7 @@ impl AppsManagerClient {
         .await?;
 
         if let (Some(output), Some(max)) = (usage.usage.output_tokens, model_config.max_tokens) {
-            if output >= max {
+            if output >= i64::from(max) {
                 return Err("App content update was truncated because the response hit the token limit. Try requesting smaller changes.".to_string());
             }
         }

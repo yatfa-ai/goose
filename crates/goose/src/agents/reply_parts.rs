@@ -761,7 +761,7 @@ impl Agent {
         session_id: &str,
         schedule_id: Option<String>,
         usage: &ProviderUsage,
-        post_compaction_context_tokens: Option<i32>,
+        post_compaction_context_tokens: Option<i64>,
     ) -> Result<ProviderUsage> {
         let manager = self.config.session_manager.clone();
         let session = manager.get_session(session_id, false).await?;

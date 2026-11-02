@@ -191,6 +191,50 @@ pub async fn run_close_session<C: Connection>() {
     expected_session_id.assert_matches(&db_ids[0]);
 }
 
+/// END-TO-END REGRESSION for the production wedge (Oct 2026).
+///
+/// An accumulated token counter past i32::MAX used to fail the row decode,
+/// which failed `session/list`, which left goose's ACP server unable to finish
+/// booting — so the agent went silent while still reporting fresh presence.
+/// This drives a REAL `session/list` over ACP, which is the layer that actually
+/// broke; the storage-level tests alone pass one layer below it.
+pub async fn run_list_sessions_with_overflowed_token_counters<C: Connection>() {
+    const HUGE: i64 = 3_000_000_000;
+
+    let BasicSession { conn, session } =
+        new_basic_session::<C>(TestConnectionConfig::default()).await;
+    let data_root = conn.data_root();
+
+    let db_path = data_root.join("sessions").join("sessions.db");
+    let pool = SqlitePoolOptions::new()
+        .connect(&format!("sqlite:{}", db_path.display()))
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE sessions SET accumulated_total_tokens = ?, accumulated_input_tokens = ?,
+         accumulated_output_tokens = ?",
+    )
+    .bind(HUGE)
+    .bind(HUGE)
+    .bind(HUGE)
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
+    let response = conn
+        .list_sessions()
+        .await
+        .expect("session/list must succeed with counters above i32::MAX");
+    assert!(
+        response
+            .sessions
+            .iter()
+            .any(|s| &s.session_id == session.session_id()),
+        "the session with overflowed counters must still be listed"
+    );
+}
+
 pub async fn run_delete_session<C: Connection>() {
     let BasicSession { mut conn, session } =
         new_basic_session::<C>(TestConnectionConfig::default()).await;

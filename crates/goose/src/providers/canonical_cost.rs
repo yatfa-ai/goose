@@ -197,7 +197,7 @@ mod tests {
     use super::*;
     use crate::config::declarative_providers::custom_providers_dir;
 
-    fn usage(input: Option<i32>, output: Option<i32>, cache_read: Option<i32>) -> Usage {
+    fn usage(input: Option<i64>, output: Option<i64>, cache_read: Option<i64>) -> Usage {
         Usage {
             input_tokens: input,
             output_tokens: output,
