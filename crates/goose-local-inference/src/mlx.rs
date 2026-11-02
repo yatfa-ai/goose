@@ -333,12 +333,12 @@ mod imp {
                 )?;
             }
 
-            let output_tokens = generated_ids.len() as i32;
-            let input_tokens = prompt_tokens.len() as i32;
+            let output_tokens = generated_ids.len() as i64;
+            let input_tokens = prompt_tokens.len() as i64;
             let usage = Usage::new(
                 Some(input_tokens),
                 Some(output_tokens),
-                Some(input_tokens + output_tokens),
+                Some(input_tokens.saturating_add(output_tokens)),
             );
             let log_json = serde_json::json!({
                 "path": "mlx",

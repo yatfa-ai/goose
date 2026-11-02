@@ -557,14 +557,26 @@ pub struct Usage {
     pub additional_data_json: Option<String>,
 }
 
+/// Narrow a token count for the uniffi boundary.
+///
+/// The records below stay `Option<i32>` DELIBERATELY while the rest of the
+/// codebase widened to i64: their field types ARE the FFI surface, so widening
+/// would turn `Int32?` into `Int64?` in the generated Swift and Kotlin — a
+/// breaking change for every external SDK consumer. Both records carry per-call
+/// values, which are bounded by the context window, so the clamp is unreachable
+/// in practice. This asymmetry is intentional; do not "finish the widen" here.
+fn clamp_to_i32(value: Option<i64>) -> Option<i32> {
+    value.map(|v| i32::try_from(v).unwrap_or(i32::MAX))
+}
+
 impl Usage {
     fn from_provider_usage(usage: &ProviderUsage) -> Result<Self, GooseError> {
         Ok(Self {
-            input_tokens: usage.usage.input_tokens,
-            output_tokens: usage.usage.output_tokens,
-            total_tokens: usage.usage.total_tokens,
-            cache_read_input_tokens: usage.usage.cache_read_input_tokens,
-            cache_creation_input_tokens: usage.usage.cache_write_input_tokens,
+            input_tokens: clamp_to_i32(usage.usage.input_tokens),
+            output_tokens: clamp_to_i32(usage.usage.output_tokens),
+            total_tokens: clamp_to_i32(usage.usage.total_tokens),
+            cache_read_input_tokens: clamp_to_i32(usage.usage.cache_read_input_tokens),
+            cache_creation_input_tokens: clamp_to_i32(usage.usage.cache_write_input_tokens),
             reasoning_tokens: None,
             model: usage.model.clone(),
             provider_metadata_json: Some(serde_json::to_string(usage)?),
@@ -1174,11 +1186,11 @@ impl Provider {
 
         Ok(CompactionSummary {
             text: summary.message.as_concat_text(),
-            input_tokens: summary.usage.usage.input_tokens,
-            output_tokens: summary.usage.usage.output_tokens,
-            total_tokens: summary.usage.usage.total_tokens,
-            cache_read_input_tokens: summary.usage.usage.cache_read_input_tokens,
-            cache_creation_input_tokens: summary.usage.usage.cache_write_input_tokens,
+            input_tokens: clamp_to_i32(summary.usage.usage.input_tokens),
+            output_tokens: clamp_to_i32(summary.usage.usage.output_tokens),
+            total_tokens: clamp_to_i32(summary.usage.usage.total_tokens),
+            cache_read_input_tokens: clamp_to_i32(summary.usage.usage.cache_read_input_tokens),
+            cache_creation_input_tokens: clamp_to_i32(summary.usage.usage.cache_write_input_tokens),
         })
     }
 }
@@ -1661,6 +1673,20 @@ fn message_to_chunks(message: Message) -> Vec<StreamChunk> {
 mod tests {
     use super::*;
 
+    /// The uniffi records stay i32 on purpose (their field types ARE the
+    /// Swift/Kotlin FFI surface), so the conversion must clamp rather than
+    /// wrap or panic. This pins the deliberate asymmetry against the rest of
+    /// the codebase, which widened to i64 — do not "finish the widen" here
+    /// without accepting an FFI break.
+    #[test]
+    fn test_uniffi_usage_clamps_above_i32_max() {
+        assert_eq!(clamp_to_i32(None), None);
+        assert_eq!(clamp_to_i32(Some(1_000)), Some(1_000));
+        assert_eq!(clamp_to_i32(Some(i64::from(i32::MAX))), Some(i32::MAX));
+        assert_eq!(clamp_to_i32(Some(i64::from(i32::MAX) + 1)), Some(i32::MAX));
+        assert_eq!(clamp_to_i32(Some(5_000_000_000)), Some(i32::MAX));
+    }
+
     fn base_model_config() -> ProviderModelConfig {
         ProviderModelConfig {
             model_name: "test".to_string(),
@@ -1876,8 +1902,8 @@ mod tests {
     }
 
     fn provider_usage_with_cache(
-        cache_read: Option<i32>,
-        cache_write: Option<i32>,
+        cache_read: Option<i64>,
+        cache_write: Option<i64>,
     ) -> ProviderUsage {
         use goose_providers::conversation::token_usage::Usage as GooseUsage;
 

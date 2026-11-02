@@ -185,7 +185,7 @@ fn escape_xml_text(value: &str) -> String {
 }
 
 fn compaction_remaining_line(
-    total_tokens: Option<i32>,
+    total_tokens: Option<i64>,
     context_limit: Option<usize>,
     threshold: f64,
 ) -> Option<String> {
@@ -196,7 +196,7 @@ fn compaction_remaining_line(
         return None;
     }
 
-    let compaction_at = (context_limit as f64 * threshold) as i32;
+    let compaction_at = (context_limit as f64 * threshold) as i64;
     if compaction_at <= 0 || (total_tokens as f64 / compaction_at as f64) < 0.5 {
         return None;
     }

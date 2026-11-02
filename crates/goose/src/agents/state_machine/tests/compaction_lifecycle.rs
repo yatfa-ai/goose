@@ -33,7 +33,7 @@ async fn proactive_and_manual_compaction_continue_with_replaced_usage() -> Resul
     budget.assert_message(-1, Agent, "budget checked");
     assert!(api.calls().last().unwrap().input_contains("<compaction>"));
 
-    let filled_usage = (pipeline.context_limit() as f64 * 0.81) as i32;
+    let filled_usage = (pipeline.context_limit() as f64 * 0.81) as i64;
     pipeline.set_total_tokens(filled_usage).await;
     let compacted = pipeline.run(["continue"]).await?;
     compacted.assert_message(-1, Agent, "continued after compaction");
@@ -200,7 +200,7 @@ async fn context_owning_provider_has_no_compaction_operation() -> Result<()> {
     .await?;
     api.on("continue").reply("continued");
     pipeline
-        .set_total_tokens((pipeline.context_limit() as f64 * 0.81) as i32)
+        .set_total_tokens((pipeline.context_limit() as f64 * 0.81) as i64)
         .await;
 
     let continued = pipeline.run(["continue"]).await?;
@@ -471,7 +471,7 @@ async fn a_small_model_compacts_a_large_tool_result_out_of_the_conversation() ->
     pipeline
         .seed([Message::user().with_text("old work"), request, response])
         .await?;
-    let filled_usage = (pipeline.context_limit() as f64 * 0.85) as i32;
+    let filled_usage = (pipeline.context_limit() as f64 * 0.85) as i64;
     pipeline.set_total_tokens(filled_usage).await;
 
     api.on(SUMMARIZE_HISTORY).reply("large work summarized");

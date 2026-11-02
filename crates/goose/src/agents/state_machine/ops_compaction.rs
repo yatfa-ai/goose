@@ -25,7 +25,7 @@ const COMPACTION_THINKING_TEXT: &str = "goose is compacting the conversation..."
 pub(super) const MAX_CONTEXT_ERROR_COMPACTIONS: usize = 2;
 
 fn compaction_part(
-    total_tokens: Option<i32>,
+    total_tokens: Option<i64>,
     context_limit: usize,
     threshold: f64,
 ) -> Option<String> {
@@ -34,7 +34,7 @@ fn compaction_part(
         return None;
     }
 
-    let compaction_at = (context_limit as f64 * threshold) as i32;
+    let compaction_at = (context_limit as f64 * threshold) as i64;
     if compaction_at <= 0 || (total_tokens as f64 / compaction_at as f64) < 0.5 {
         return None;
     }
@@ -47,7 +47,7 @@ fn compaction_part(
 
 /// Reported usage stops at the inference that requested the tools, so the
 /// results that answered it are not counted until the next request.
-async fn unreported_tool_tokens(conversation: &Conversation) -> Result<i32> {
+async fn unreported_tool_tokens(conversation: &Conversation) -> Result<i64> {
     let messages = conversation.messages();
     if last_effective_role(messages)? != EffectiveRole::Tool {
         return Ok(0);
@@ -91,9 +91,9 @@ impl CompactionOperation {
         (tokens as f64 / self.context_limit as f64) > self.threshold
     }
 
-    async fn context_tokens(&self, session: &Session, conversation: &Conversation) -> Result<i32> {
+    async fn context_tokens(&self, session: &Session, conversation: &Conversation) -> Result<i64> {
         match session.usage.total_tokens {
-            Some(tokens) => Ok(tokens + unreported_tool_tokens(conversation).await?),
+            Some(tokens) => Ok(tokens.saturating_add(unreported_tool_tokens(conversation).await?)),
             None => count_context_tokens(conversation.messages()).await,
         }
     }
