@@ -807,6 +807,20 @@ fn deserialize_session_model_config(
     Some(model_config)
 }
 
+/// Read one token-count column without ever failing the row.
+///
+/// Returns None when the column is missing, NULL, or holds something that does
+/// not decode as an integer (e.g. a hand-written repair that quoted its literal
+/// and wrote TEXT into an INTEGER column). Callers treat None as "unknown",
+/// which displays as zero — the deliberate trade against the alternative, where
+/// one unreadable counter aborts `fetch_all` and takes the whole session
+/// listing, and with it an agent's boot, down with it.
+fn lenient_token_count(row: &sqlx::sqlite::SqliteRow, column: &str) -> Option<i64> {
+    use sqlx::Row;
+
+    row.try_get::<Option<i64>, _>(column).unwrap_or_default()
+}
+
 impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for Session {
     fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
         use sqlx::Row;
@@ -856,25 +870,34 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for Session {
             updated_at: row.try_get("updated_at")?,
             extension_data: serde_json::from_str(&row.try_get::<String, _>("extension_data")?)
                 .unwrap_or_default(),
+            // EVERY token column is read leniently — never with `?`. The cache
+            // columns always were (they arrived in a later migration and may be
+            // absent); the other six used to be strict, and that is what wedged
+            // the fleet: an `accumulated_*` value past i32::MAX returned
+            // ColumnDecode, `fetch_all` propagated it, `session/list` failed,
+            // and the ACP server never finished booting — over numbers that
+            // `build_session_info` does not even read. The width bug itself is
+            // fixed (these are i64 now); this keeps the whole CLASS from ever
+            // again turning a cosmetic counter into a dead agent. A token count
+            // degrading to None is a displayed zero; a failed listing is a
+            // silent agent. Identity columns above keep `?` on purpose — a row
+            // without an id is unusable, and `list_sessions_matching` skips it.
             usage: Usage {
-                input_tokens: row.try_get("input_tokens")?,
-                output_tokens: row.try_get("output_tokens")?,
-                total_tokens: row.try_get("total_tokens")?,
-                cache_read_input_tokens: row.try_get("cache_read_tokens").ok().flatten(),
-                cache_write_input_tokens: row.try_get("cache_write_tokens").ok().flatten(),
+                input_tokens: lenient_token_count(row, "input_tokens"),
+                output_tokens: lenient_token_count(row, "output_tokens"),
+                total_tokens: lenient_token_count(row, "total_tokens"),
+                cache_read_input_tokens: lenient_token_count(row, "cache_read_tokens"),
+                cache_write_input_tokens: lenient_token_count(row, "cache_write_tokens"),
             },
             accumulated_usage: Usage {
-                input_tokens: row.try_get("accumulated_input_tokens")?,
-                output_tokens: row.try_get("accumulated_output_tokens")?,
-                total_tokens: row.try_get("accumulated_total_tokens")?,
-                cache_read_input_tokens: row
-                    .try_get("accumulated_cache_read_tokens")
-                    .ok()
-                    .flatten(),
-                cache_write_input_tokens: row
-                    .try_get("accumulated_cache_write_tokens")
-                    .ok()
-                    .flatten(),
+                input_tokens: lenient_token_count(row, "accumulated_input_tokens"),
+                output_tokens: lenient_token_count(row, "accumulated_output_tokens"),
+                total_tokens: lenient_token_count(row, "accumulated_total_tokens"),
+                cache_read_input_tokens: lenient_token_count(row, "accumulated_cache_read_tokens"),
+                cache_write_input_tokens: lenient_token_count(
+                    row,
+                    "accumulated_cache_write_tokens",
+                ),
             },
             accumulated_cost: row.try_get("accumulated_cost").ok().flatten(),
             schedule_id: row.try_get("schedule_id")?,
@@ -2156,7 +2179,7 @@ impl SessionStorage {
             limit_clause
         );
 
-        let mut q = sqlx::query_as::<_, Session>(AssertSqlSafe(sql));
+        let mut q = sqlx::query(AssertSqlSafe(sql));
         if let Some(types) = filters.types {
             for session_type in types {
                 q = q.bind(session_type.to_string());
@@ -2181,13 +2204,57 @@ impl SessionStorage {
         let pool = self.pool().await?;
         if has_limit {
             let mut tx = pool.begin().await?;
-            let mut sessions = q.fetch_all(&mut *tx).await?;
+            let rows = q.fetch_all(&mut *tx).await?;
+            let mut sessions = Self::decode_session_rows(&rows);
             Self::populate_visible_message_counts(&mut tx, &mut sessions).await?;
             tx.commit().await?;
             Ok(sessions)
         } else {
-            q.fetch_all(pool).await.map_err(Into::into)
+            let rows = q.fetch_all(pool).await?;
+            Ok(Self::decode_session_rows(&rows))
         }
+    }
+
+    /// Decode session rows, SKIPPING any that will not decode rather than
+    /// failing the whole listing.
+    ///
+    /// This is the single chokepoint: `list_sessions`,
+    /// `list_sessions_with_limit`, `list_sessions_by_types` and
+    /// `list_sessions_paged` all route through `list_sessions_matching`, so one
+    /// guard covers every listing. `fetch_all` is all-or-nothing, and that is
+    /// what turned one unreadable counter into a dead agent: the error reached
+    /// `session/list`, the ACP server never finished booting, and the runner sat
+    /// silent.
+    ///
+    /// Deliberately NOT applied to `get_session`: asking for one session by id
+    /// and getting silence would hide a real problem. A listing can lose an
+    /// unusable row; a point lookup must report it.
+    ///
+    /// Paging note: a skipped row yields a short page, and can retire the
+    /// cursor early if it was the lookahead row. That is the intended trade —
+    /// a short page beats a dead listing, and the skipped row was unusable.
+    fn decode_session_rows(rows: &[sqlx::sqlite::SqliteRow]) -> Vec<Session> {
+        use sqlx::FromRow;
+
+        let mut sessions = Vec::with_capacity(rows.len());
+        let mut skipped = 0usize;
+        for row in rows {
+            match Session::from_row(row) {
+                Ok(session) => sessions.push(session),
+                Err(error) => {
+                    skipped += 1;
+                    tracing::warn!(%error, "skipping a session row that failed to decode");
+                }
+            }
+        }
+        if skipped > 0 {
+            tracing::warn!(
+                skipped,
+                returned = sessions.len(),
+                "session listing skipped rows that failed to decode"
+            );
+        }
+        sessions
     }
 
     async fn populate_visible_message_counts(
@@ -4912,6 +4979,37 @@ mod tests {
             Some(HUGE),
             "totals must be reported verbatim; {} means the narrowing clamp is back",
             i32::MAX
+        );
+    }
+
+    /// Belt-and-braces for the whole CLASS: a token column holding something
+    /// that is not an integer at all (e.g. a hand-written repair that quoted
+    /// its literal and stored TEXT) must degrade that counter, never the
+    /// listing. Exercised through the real listing path, not FromRow alone.
+    #[tokio::test]
+    async fn test_list_sessions_survives_undecodable_token_column() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let id = seed_overflowed_session(&sm, "Corrupt session", 1_000).await;
+
+        let pool = sm.storage().pool().await.unwrap();
+        sqlx::query("UPDATE sessions SET accumulated_total_tokens = ? WHERE id = ?")
+            .bind("not-a-number")
+            .bind(&id)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let sessions = sm.list_sessions().await.unwrap();
+        assert_eq!(sessions.len(), 1, "a bad counter must not drop the session");
+        assert_eq!(
+            sessions[0].accumulated_usage.total_tokens, None,
+            "the unreadable counter degrades to None"
+        );
+        assert_eq!(
+            sessions[0].accumulated_usage.input_tokens,
+            Some(1_000),
+            "its healthy siblings are unaffected"
         );
     }
 
