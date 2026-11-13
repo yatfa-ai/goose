@@ -1,0 +1,43 @@
+name: yatfa-test
+
+on:
+  push:
+    branches:
+      - main
+      - "sync-*"
+  workflow_dispatch:
+
+concurrency:
+  group: yatfa-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Format
+        run: cargo fmt --check
+
+      # The feature sets are load-bearing, not cosmetic:
+      # - goose is tested with upstream's own set (ci.yml). Its lib tests assume
+      #   it: the prompt-manager snapshots list every platform extension, and a
+      #   bare `cargo test -p goose` builds an empty feature set where
+      #   jsonwebtoken finds no CryptoProvider.
+      # - goose-cli is built exactly as yatfa-release.yml ships it, which is
+      #   also the only configuration that skips the llama/cmake backend.
+      - name: Clippy (goose)
+        run: cargo clippy -p goose --all-targets --features "rustls-tls,code-mode,tree-sitter,live-voice,scheduler,platform-apps,chat-recall,acp-http" -- -D warnings
+
+      - name: Clippy (goose-cli)
+        run: cargo clippy -p goose-cli --no-default-features --features "rustls-tls,acp-http" --all-targets -- -D warnings
+
+      - name: Test (goose)
+        run: cargo test -p goose --features "rustls-tls,code-mode,tree-sitter,live-voice,scheduler,platform-apps,chat-recall,acp-http" --no-fail-fast
+
+      - name: Test (goose-cli)
+        run: cargo test -p goose-cli --no-default-features --features "rustls-tls,acp-http" --lib
