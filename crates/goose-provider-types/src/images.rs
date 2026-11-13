@@ -1,4 +1,8 @@
-use std::{borrow::Cow, io::Read as _, path::Path};
+use std::{
+    borrow::Cow,
+    io::{Cursor, Read as _},
+    path::Path,
+};
 
 use base64::Engine as _;
 use rmcp::model::ImageContent;
@@ -8,6 +12,9 @@ use serde_json::{json, Value};
 use crate::errors::ProviderError;
 
 const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+
+/// Anthropic rejects any image with an edge longer than this.
+const MAX_ANTHROPIC_IMAGE_EDGE: u32 = 8000;
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub enum ImageFormat {
@@ -24,15 +31,54 @@ pub fn convert_image(image: &ImageContent, image_format: &ImageFormat) -> Value 
                 "url": format!("data:{};base64,{}", image.mime_type, image.data)
             }
         }),
-        ImageFormat::Anthropic => json!({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": image.mime_type,
-                "data": image.data,
-            }
-        }),
+        ImageFormat::Anthropic => {
+            let (media_type, data) = match downscale_oversized_image(image) {
+                Some(downscaled) => ("image/png", Cow::Owned(downscaled)),
+                None => (image.mime_type.as_str(), Cow::Borrowed(image.data.as_str())),
+            };
+            json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": data,
+                }
+            })
+        }
     }
+}
+
+/// Shrink an image Anthropic would reject for being too large, re-encoded as PNG.
+/// `None` leaves the image untouched: it already fits, or it cannot be decoded.
+fn downscale_oversized_image(image: &ImageContent) -> Option<String> {
+    let bytes = base64::prelude::BASE64_STANDARD.decode(&image.data).ok()?;
+    let (width, height) = image::io::Reader::new(Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
+    if width.max(height) <= MAX_ANTHROPIC_IMAGE_EDGE {
+        return None;
+    }
+
+    match downscale_to_png(&bytes) {
+        Ok(png) => Some(base64::prelude::BASE64_STANDARD.encode(png)),
+        Err(e) => {
+            tracing::warn!("sending {width}x{height} image unscaled: {e}");
+            None
+        }
+    }
+}
+
+fn downscale_to_png(bytes: &[u8]) -> Result<Vec<u8>, image::ImageError> {
+    let resized = image::load_from_memory(bytes)?.resize(
+        MAX_ANTHROPIC_IMAGE_EDGE,
+        MAX_ANTHROPIC_IMAGE_EDGE,
+        image::imageops::FilterType::Triangle,
+    );
+    let mut png = Vec::new();
+    resized.write_to(&mut Cursor::new(&mut png), image::ImageOutputFormat::Png)?;
+    Ok(png)
 }
 
 pub fn detect_image_path(text: &str) -> Option<Cow<'_, str>> {

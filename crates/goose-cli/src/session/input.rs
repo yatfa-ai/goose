@@ -57,7 +57,9 @@ impl CtrlCHandler {
 }
 
 impl rustyline::ConditionalEventHandler for CtrlCHandler {
-    /// Handle Ctrl+C to clear the line if text is entered, otherwise check if we should exit.
+    /// Clears the line if text is entered. On an empty line, either arms and confirms
+    /// the "press again to exit" flow or, with `GOOSE_CLI_EXIT_ON_INTERRUPT=false`,
+    /// swallows the keypress.
     fn handle(
         &self,
         _event: &rustyline::Event,
@@ -65,24 +67,31 @@ impl rustyline::ConditionalEventHandler for CtrlCHandler {
         _positive: bool,
         ctx: &rustyline::EventContext,
     ) -> Option<rustyline::Cmd> {
+        let mut cache = self.completion_cache.write().unwrap();
         if !ctx.line().is_empty() {
-            // Clear the line if there's text
-            let mut cache = self.completion_cache.write().unwrap();
             cache.hint_status = HintStatus::Default;
-            Some(rustyline::Cmd::Kill(rustyline::Movement::WholeBuffer))
-        } else {
-            let mut cache = self.completion_cache.write().unwrap();
-
-            if cache.hint_status == HintStatus::MaybeExit {
-                return Some(rustyline::Cmd::Interrupt);
-            }
-
-            cache.hint_status = HintStatus::MaybeExit;
-            drop(cache);
-
-            Some(rustyline::Cmd::Repaint)
+            return Some(rustyline::Cmd::Kill(rustyline::Movement::WholeBuffer));
         }
+        if !exit_on_interrupt() {
+            // Declining with None would fall back to the terminal's VINTR binding,
+            // which interrupts readline and exits the session.
+            return Some(rustyline::Cmd::Noop);
+        }
+        if cache.hint_status == HintStatus::MaybeExit {
+            return Some(rustyline::Cmd::Interrupt);
+        }
+        cache.hint_status = HintStatus::MaybeExit;
+        Some(rustyline::Cmd::Repaint)
     }
+}
+
+/// Whether a second Ctrl+C at an empty prompt exits the session. Set
+/// `GOOSE_CLI_EXIT_ON_INTERRUPT=false` for supervised runs where a stray interrupt
+/// must not end the session; exit is then only reachable via `/exit`.
+fn exit_on_interrupt() -> bool {
+    Config::global()
+        .get_param::<bool>("GOOSE_CLI_EXIT_ON_INTERRUPT")
+        .unwrap_or(true)
 }
 
 /// The Ctrl-modified character that inserts a newline instead of submitting the
@@ -172,6 +181,13 @@ pub fn get_input(
             rustyline::KeyCode::Char(get_newline_key()),
             rustyline::Modifiers::CTRL,
         ),
+        rustyline::EventHandler::Simple(rustyline::Cmd::Newline),
+    );
+
+    // Alt reaches rustyline as an ESC prefix; Shift+Enter and Ctrl+Enter are
+    // byte-identical to Enter, so Enter+ALT is the only bindable Enter modifier.
+    editor.bind_sequence(
+        rustyline::KeyEvent(rustyline::KeyCode::Enter, rustyline::Modifiers::ALT),
         rustyline::EventHandler::Simple(rustyline::Cmd::Newline),
     );
 
@@ -411,6 +427,11 @@ fn parse_prompt_command(args: &str) -> Option<InputResult> {
 fn help_text() -> String {
     let modes = GooseMode::VARIANTS.join(", ");
     let newline_key = get_newline_key().to_ascii_uppercase();
+    let ctrl_c_help = if exit_on_interrupt() {
+        "Ctrl+C - Clear current line if text is entered, otherwise exit the session"
+    } else {
+        "Ctrl+C - Clear current line if text is entered (exit disabled via GOOSE_CLI_EXIT_ON_INTERRUPT; use /exit)"
+    };
     let additional_builtin_help = additional_builtin_help();
     let additional_builtin_help = if additional_builtin_help.is_empty() {
         String::new()
@@ -443,7 +464,8 @@ fn help_text() -> String {
 Navigation:
 Enter - Send message
 Ctrl+{newline_key} - Add a newline (configurable via GOOSE_CLI_NEWLINE_KEY)
-Ctrl+C - Clear current line if text is entered, otherwise exit the session
+Alt+Enter - Add a newline
+{ctrl_c_help}
 Up/Down arrows - Navigate through command history
 GOOSE_CLI_BELL=true - Ring the terminal bell when goose finishes a turn or needs approval"
     )
