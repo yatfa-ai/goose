@@ -2,6 +2,7 @@ mod common;
 mod handoff;
 #[cfg(feature = "acp-http")]
 mod mcp_app_proxy;
+pub mod pane_turn;
 mod provider;
 mod response_builder;
 pub mod server;
@@ -9,12 +10,15 @@ pub mod server_factory;
 pub(crate) mod tool_call_notifier;
 #[cfg(feature = "acp-http")]
 pub mod transport;
+pub mod turn_event;
 
 pub use common::{map_permission_response, PermissionDecision};
 pub use goose_sdk_types::{custom_notifications, custom_requests};
+pub use pane_turn::{PaneTurnEvent, PaneTurnPublisher};
 pub use provider::{
     extension_configs_to_mcp_servers, AcpProvider, AcpProviderConfig, ACP_CURRENT_MODEL,
 };
+pub use turn_event::{AcpTurnEvent, AcpTurnTap, LiveRun, LiveRunLink};
 
 /// `data.reason` on a prompt error raised because the agent's account is out of credits.
 /// Set by the ACP server, read by the provider to tell a spent account apart from a

@@ -223,8 +223,15 @@ impl AcpConnection {
             .await
             .internal_err()?;
 
-        let session_infos: Vec<SessionInfo> =
+        let mut session_infos: Vec<SessionInfo> =
             page.sessions.into_iter().map(build_session_info).collect();
+        self.mark_live_session(
+            &mut session_infos,
+            req.cursor.is_none() && keyword.is_none(),
+            cwd,
+            &session_types,
+        )
+        .await;
         let next_cursor = page
             .next_cursor
             .as_ref()
@@ -234,4 +241,61 @@ impl AcpConnection {
             .transpose()?;
         Ok(ListSessionsResponse::new(session_infos).next_cursor(next_cursor))
     }
+
+    /// Point a client at the session this process is actually driving.
+    ///
+    /// Two things make the live session hard to find. It is hidden while it has
+    /// no messages, which is right for a session picker but wrong here: a
+    /// `goose run` writes its session row before it has processed a turn, so a
+    /// client asking which session it can attach to is told "none" and opens a
+    /// parallel one, and the pane's human then types into a conversation that
+    /// client never watches. And once it has messages it is merely one row among
+    /// the leftovers of previous runs, where the most recently updated one can
+    /// be a conversation nobody is driving.
+    ///
+    /// So the live session is listed even when empty, and flagged either way.
+    /// Injected on the first page only, so paging cannot show it twice; a
+    /// keyword search is left alone, since a client searching is not attaching.
+    async fn mark_live_session(
+        &self,
+        session_infos: &mut Vec<SessionInfo>,
+        may_inject: bool,
+        cwd: Option<&std::path::Path>,
+        session_types: &[SessionType],
+    ) {
+        let Some(live_run) = &self.live_run else {
+            return;
+        };
+        let live = live_run.session_id.as_str();
+
+        if let Some(listed) = session_infos
+            .iter_mut()
+            .find(|info| &*info.session_id.0 == live)
+        {
+            flag_live(listed);
+            return;
+        }
+        if !may_inject {
+            return;
+        }
+
+        let Ok(session) = self.services.session_manager.get_session(live, false).await else {
+            return;
+        };
+        if !session_types.contains(&session.session_type)
+            || cwd.is_some_and(|cwd| cwd != session.working_dir)
+        {
+            return;
+        }
+
+        let mut info = build_session_info(session);
+        flag_live(&mut info);
+        session_infos.insert(0, info);
+    }
+}
+
+fn flag_live(info: &mut SessionInfo) {
+    let mut meta = info.meta.take().unwrap_or_default();
+    meta.insert("live".to_string(), serde_json::Value::Bool(true));
+    info.meta = Some(meta);
 }

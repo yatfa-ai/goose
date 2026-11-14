@@ -7,7 +7,7 @@ pub(super) use crate::acp::response_builder::{
     session_response_meta, should_refresh_inventory_for_session_init,
 };
 use crate::acp::tool_call_notifier::ToolCallNotifier;
-use crate::acp::{PermissionDecision, ACP_CURRENT_MODEL};
+use crate::acp::{AcpTurnEvent, LiveRunLink, PaneTurnEvent, PermissionDecision, ACP_CURRENT_MODEL};
 use crate::agents::extension::{Envs, PLATFORM_EXTENSIONS};
 use crate::agents::extension_manager::ClientContext;
 use crate::agents::mcp_client::GooseMcpHostInfo;
@@ -124,8 +124,8 @@ mod resources;
 mod schedule;
 mod slash_commands;
 mod sources;
-mod tool_calls;
-mod tool_notifications;
+pub(crate) mod tool_calls;
+pub(crate) mod tool_notifications;
 mod tools;
 
 pub type AcpProviderFactory =
@@ -330,6 +330,8 @@ pub struct AcpConnection {
     additional_source_roots: Vec<SourceRoot>,
     session_cwd: Option<PathBuf>,
     recipe_path_cache: Arc<Mutex<HashMap<String, PathBuf>>>,
+    live_run: Option<LiveRunLink>,
+    pane_turn_forwarder: OnceCell<()>,
 }
 
 impl Drop for AcpConnection {
@@ -1009,7 +1011,14 @@ impl AcpConnection {
             additional_source_roots: options.additional_source_roots,
             session_cwd: options.session_cwd,
             recipe_path_cache: Arc::new(Mutex::new(HashMap::new())),
+            live_run: None,
+            pane_turn_forwarder: OnceCell::new(),
         })
+    }
+
+    pub(crate) fn with_live_run(mut self, live_run: Option<LiveRunLink>) -> Self {
+        self.live_run = live_run;
+        self
     }
 
     fn config(&self) -> Result<&'static Config, agent_client_protocol::Error> {
@@ -1257,6 +1266,82 @@ impl AcpConnection {
                 }
             }
         });
+    }
+
+    /// Forward turns typed in the owning pane to this connection's client.
+    ///
+    /// Without this a locally-typed turn is invisible to every attached client
+    /// (upstream #10130): notifications are sent through the connection serving
+    /// a request, and a human typing in the terminal is serving none. The
+    /// forwarder sends notifications and nothing else: the pane owns that turn,
+    /// including its approvals and its persistence.
+    ///
+    /// Only sessions this connection has open are forwarded, so a client is
+    /// never told about a session it never asked for.
+    async fn start_pane_turn_forwarder(self: &Arc<Self>, cx: &ConnectionTo<Client>) {
+        let Some(live_run) = self.live_run.as_ref() else {
+            return;
+        };
+        if self.pane_turn_forwarder.set(()).is_err() {
+            return;
+        }
+
+        let mut turns = live_run.pane_turns.subscribe();
+        let connection = Arc::downgrade(self);
+        let cx = cx.clone();
+        tokio::spawn(async move {
+            let mut tool_requests = HashMap::new();
+            loop {
+                let event = match turns.recv().await {
+                    Ok(event) => event,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                        warn!(
+                            missed,
+                            "pane turn forwarder fell behind; events were dropped"
+                        );
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
+                let Some(connection) = connection.upgrade() else {
+                    break;
+                };
+                if !connection.has_session(&event.session_id) {
+                    continue;
+                }
+                for update in
+                    crate::acp::pane_turn::pane_turn_updates(&event.event, &mut tool_requests)
+                {
+                    if let Err(error) = cx.send_notification(
+                        crate::acp::pane_turn::pane_turn_notification(&event.session_id, update),
+                    ) {
+                        warn!(%error, "Failed to forward a pane turn to the client");
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    /// Duplicate a turn tick onto the pane's mirror channel. Never blocks the
+    /// reply path; the send only fails once the pane has gone away.
+    fn tap_turn_event(&self, event: AcpTurnEvent) {
+        if let Some(live_run) = &self.live_run {
+            let _ = live_run.turn_tap.send(event);
+        }
+    }
+
+    /// The prompt that opens a turn is the one message the reply stream never
+    /// carries, so a client watching the session, rather than the one that sent
+    /// the prompt, sees an answer to a question it never saw asked. Steers need
+    /// no equivalent: the agent yields those into the stream itself.
+    fn publish_socket_turn(&self, session_id: &str, message: &Message) {
+        if let Some(live_run) = &self.live_run {
+            let _ = live_run.pane_turns.send(PaneTurnEvent {
+                session_id: session_id.to_string(),
+                event: Arc::new(crate::agents::AgentEvent::Message(message.clone())),
+            });
+        }
     }
 
     async fn activate_acp_session(
@@ -2091,6 +2176,10 @@ impl AcpConnection {
                 continue;
             }
 
+            if let Ok(tick) = &event {
+                self.tap_turn_event(AcpTurnEvent::StreamEvent(Box::new(tick.clone())));
+            }
+
             match event {
                 Ok(crate::agents::AgentEvent::Message(mut message)) => {
                     update_output_token_limit_reached(&mut output_token_limit_reached, &message);
@@ -2278,6 +2367,11 @@ impl AcpConnection {
         }
 
         let user_message = Self::convert_acp_prompt_to_message(&args.prompt);
+        self.tap_turn_event(AcpTurnEvent::PromptReceived {
+            session_id: session_id.clone(),
+            text: user_message.as_concat_text(),
+        });
+        self.publish_socket_turn(&session_id, &user_message);
         // The client's trace context must stay attached while the turn's spans and tool calls are polled.
         #[cfg(feature = "otel")]
         let trace_cx = crate::otel::trace_context::extract_from_meta(args.meta.as_ref())
@@ -2296,6 +2390,10 @@ impl AcpConnection {
         let stream = match reply.await {
             Ok(stream) => stream,
             Err(error) => {
+                self.tap_turn_event(AcpTurnEvent::TurnFailed {
+                    session_id: session_id.clone(),
+                    error: error.to_string(),
+                });
                 self.clear_active_run(&session_id, &run_id).await;
                 let _ = Self::send_active_run_update(cx, &args.session_id, None);
                 return Err(agent_client_protocol::Error::internal_error()
@@ -2307,6 +2405,25 @@ impl AcpConnection {
         #[cfg(feature = "otel")]
         let forward = opentelemetry::context::FutureExt::with_context(forward, trace_cx);
         let stream_result = forward.await;
+        match &stream_result {
+            Ok(outcome) if !outcome.was_cancelled => {
+                self.tap_turn_event(AcpTurnEvent::TurnDone {
+                    session_id: session_id.clone(),
+                });
+            }
+            Ok(_) => {
+                self.tap_turn_event(AcpTurnEvent::TurnFailed {
+                    session_id: session_id.clone(),
+                    error: "cancelled".to_string(),
+                });
+            }
+            Err(error) => {
+                self.tap_turn_event(AcpTurnEvent::TurnFailed {
+                    session_id: session_id.clone(),
+                    error: error.to_string(),
+                });
+            }
+        }
         self.clear_active_run(&session_id, &run_id).await;
         Self::send_active_run_update(cx, &args.session_id, None)?;
         let usage_result = self

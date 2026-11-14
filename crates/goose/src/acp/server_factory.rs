@@ -2,6 +2,7 @@ use crate::acp::server::{
     acp_services_config, AcpBuiltinSelection, AcpConnection, AcpConnectionOptions,
     AcpProviderFactory, LiveVoiceService,
 };
+use crate::acp::LiveRun;
 use crate::agents::GoosePlatform;
 use crate::agents::StateMachineServices;
 use crate::config::paths::Paths;
@@ -28,6 +29,7 @@ pub struct AcpServer {
     config: AcpServerFactoryConfig,
     data_dir: std::path::PathBuf,
     services: OnceCell<Arc<StateMachineServices>>,
+    live_run: Option<LiveRun>,
     live_voice: std::sync::OnceLock<Arc<LiveVoiceService>>,
 }
 
@@ -38,7 +40,19 @@ impl AcpServer {
             config,
             data_dir,
             services: OnceCell::new(),
+            live_run: None,
             live_voice: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// A server for an interactive `goose run`: it serves the services the run is
+    /// already driving instead of building its own, so a client that loads the
+    /// run's session reaches the live session rather than a twin of it.
+    pub fn for_live_run(config: AcpServerFactoryConfig, live_run: LiveRun) -> Self {
+        Self {
+            services: OnceCell::new_with(Some(live_run.services.clone())),
+            live_run: Some(live_run),
+            ..Self::new(config)
         }
     }
 
@@ -121,7 +135,8 @@ impl AcpServer {
             })),
             services,
         })
-        .await?;
+        .await?
+        .with_live_run(self.live_run.as_ref().map(|live_run| live_run.link.clone()));
         info!("Created new ACP agent");
 
         Ok(Arc::new(connection))
@@ -136,6 +151,7 @@ impl AcpServer {
             config,
             data_dir,
             services: OnceCell::new(),
+            live_run: None,
             live_voice: std::sync::OnceLock::new(),
         }
     }

@@ -28,7 +28,7 @@ enum ToolNotification {
     },
 }
 
-pub(super) fn tool_notification_update(
+pub(crate) fn tool_notification_update(
     tool_call_id: impl Into<ToolCallId>,
     notification: ServerNotification,
 ) -> Option<ToolCallUpdate> {

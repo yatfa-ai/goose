@@ -1,3 +1,4 @@
+mod acp_mirror;
 mod builder;
 mod completion;
 pub mod editor;
@@ -252,6 +253,15 @@ pub struct CliSession {
     /// gate.
     extension_loading: Option<AbortOnDropHandle<Result<Vec<ExtensionFailure>>>>,
     loading_announced: bool,
+    /// Live mirror of ACP-driven turns, attached when `goose run` lifted a
+    /// run-side ACP server (`GOOSE_RUN_SERVE_ACP_PORT`). `None` for a plain
+    /// interactive run.
+    acp_turn_rx: Option<tokio::sync::mpsc::UnboundedReceiver<goose::acp::AcpTurnEvent>>,
+    /// Where this session publishes the turns its human types, so clients
+    /// attached over the run-side ACP server see them instead of a session that
+    /// appears to stall whenever the operator takes over. `None` without
+    /// serve-on-run.
+    pane_turns: Option<goose::acp::PaneTurnPublisher>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -336,11 +346,33 @@ impl CliSession {
             stats,
             extension_loading,
             loading_announced: false,
+            acp_turn_rx: None,
+            pane_turns: None,
         }
     }
 
     pub fn session_id(&self) -> &String {
         &self.session_id
+    }
+
+    pub fn serve_acp_turns(
+        &mut self,
+        turns: tokio::sync::mpsc::UnboundedReceiver<goose::acp::AcpTurnEvent>,
+        pane_turns: goose::acp::PaneTurnPublisher,
+    ) {
+        self.acp_turn_rx = Some(turns);
+        self.pane_turns = Some(pane_turns);
+    }
+
+    /// A send failure means nobody is attached, which is the ordinary case for
+    /// an interactive run.
+    fn publish_pane_turn(&self, event: &AgentEvent) {
+        if let Some(publisher) = &self.pane_turns {
+            let _ = publisher.send(goose::acp::PaneTurnEvent {
+                session_id: self.session_id.clone(),
+                event: Arc::new(event.clone()),
+            });
+        }
     }
 
     /// Parse a stdio extension command string into an ExtensionConfig
@@ -632,6 +664,10 @@ impl CliSession {
         let mut editor = self.create_editor()?;
         let history_manager = HistoryManager::new();
         history_manager.load(&mut editor);
+
+        if let Some(turns) = self.acp_turn_rx.take() {
+            acp_mirror::spawn(turns, editor.create_external_printer().ok(), self.debug);
+        }
 
         loop {
             if self
@@ -1359,6 +1395,8 @@ impl CliSession {
             .messages
             .last()
             .ok_or_else(|| anyhow::anyhow!("No user message"))?;
+        self.publish_pane_turn(&AgentEvent::Message(user_message.clone()));
+
         let cancel_token_interrupt = cancel_token.clone();
         let handle = tokio::spawn(async move {
             if ctrl_c().await.is_ok() {
@@ -1392,6 +1430,9 @@ impl CliSession {
         loop {
             tokio::select! {
                 result = stream.next() => {
+                    if let Some(Ok(event)) = &result {
+                        self.publish_pane_turn(event);
+                    }
                     match result {
                         Some(Ok(AgentEvent::Message(message))) => {
                             if first_token_at.is_none() && message_has_text(&message) {

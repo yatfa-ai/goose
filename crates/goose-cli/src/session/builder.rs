@@ -880,6 +880,8 @@ pub async fn try_build_session(session_config: SessionBuilderConfig) -> anyhow::
             process::exit(1);
         });
 
+    #[cfg(feature = "acp-http")]
+    let live_services = Arc::clone(&agent_ptr);
     let session = CliSession::new(
         agent_ptr,
         session_id.clone(),
@@ -894,6 +896,13 @@ pub async fn try_build_session(session_config: SessionBuilderConfig) -> anyhow::
     )
     .await;
 
+    #[cfg(feature = "acp-http")]
+    let mut session = session;
+    #[cfg(feature = "acp-http")]
+    if let Some((turns, pane_turns)) = serve_acp_on_run(&live_services, &session_id).await {
+        session.serve_acp_turns(turns, pane_turns);
+    }
+
     if !session_config.quiet {
         output::display_session_info(
             session_config.resume,
@@ -903,6 +912,108 @@ pub async fn try_build_session(session_config: SessionBuilderConfig) -> anyhow::
         );
     }
     Ok(session)
+}
+
+/// Lets an interactive `goose run` host an ACP server over its own services, so a
+/// dispatcher can `session/load` the run's session and steer the in-flight turn
+/// without the run giving up its terminal.
+///
+/// Opt-in through `GOOSE_RUN_SERVE_ACP_PORT`; unset, nothing here runs. The server
+/// is handed the run's `StateMachineServices`, so a client reaches the live
+/// session, not a twin of it. It listens on loopback only and requires no token
+/// unless `GOOSE_SERVER__SECRET_KEY` is set: the bridge to serve link stays inside
+/// one container.
+///
+/// Returns the channels that carry turns between the pane and the clients: ACP
+/// turns the pane renders, and the turns the pane publishes.
+#[cfg(feature = "acp-http")]
+async fn serve_acp_on_run(
+    services: &Arc<StateMachineServices>,
+    session_id: &str,
+) -> Option<(
+    tokio::sync::mpsc::UnboundedReceiver<goose::acp::AcpTurnEvent>,
+    goose::acp::PaneTurnPublisher,
+)> {
+    use goose::acp::server::AcpBuiltinSelection;
+    use goose::acp::server_factory::{AcpServer, AcpServerFactoryConfig};
+    use goose::acp::{LiveRun, LiveRunLink};
+    use goose::agents::extension_manager::ClientContext;
+    use goose::agents::Attachment;
+    use goose::config::paths::Paths;
+
+    const PANE_CONNECTION_ID: u64 = u64::MAX;
+
+    let raw_port = std::env::var("GOOSE_RUN_SERVE_ACP_PORT").ok()?;
+    let Ok(port) = raw_port.trim().parse::<u16>() else {
+        eprintln!(
+            "GOOSE_RUN_SERVE_ACP_PORT={raw_port:?} is not a valid port; ACP server not started"
+        );
+        return None;
+    };
+
+    // The pane holds its own session open, so a client closing it cannot release
+    // the session out from under the run.
+    services
+        .attach_session(
+            session_id,
+            PANE_CONNECTION_ID,
+            Attachment {
+                client: ClientContext::new(&services.goose_platform, None),
+                session_names: None,
+            },
+        )
+        .await;
+
+    let (turn_tap, turns) = tokio::sync::mpsc::unbounded_channel();
+    // Bounded: a client that cannot keep up with a live view loses the oldest
+    // events and is told so, rather than growing a queue behind the render loop.
+    let (pane_turns, _) = tokio::sync::broadcast::channel(1024);
+
+    let server = Arc::new(AcpServer::for_live_run(
+        AcpServerFactoryConfig {
+            builtins: AcpBuiltinSelection::from_requested(Vec::new()),
+            config_dir: Paths::config_dir(),
+            goose_platform: services.goose_platform.clone(),
+            additional_source_roots: Vec::new(),
+            session_cwd: None,
+            enable_scheduler: false,
+        },
+        LiveRun {
+            services: Arc::clone(services),
+            link: LiveRunLink {
+                session_id: session_id.to_string(),
+                turn_tap,
+                pane_turns: pane_turns.clone(),
+            },
+        },
+    ));
+
+    let secret_key = std::env::var("GOOSE_SERVER__SECRET_KEY")
+        .ok()
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty());
+    let require_token = secret_key.is_some();
+    let secret_key = secret_key.unwrap_or_else(crate::cli::generate_serve_secret_key);
+    let router =
+        goose::acp::transport::create_router(server, secret_key, require_token, Vec::new());
+
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    tokio::spawn(async move {
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                eprintln!("Failed to bind run-side ACP server on {addr}: {error}");
+                return;
+            }
+        };
+        let _ = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
+    });
+
+    Some((turns, pane_turns))
 }
 
 pub fn is_provider_unavailable_error(e: &anyhow::Error) -> bool {

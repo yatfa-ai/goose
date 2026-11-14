@@ -23,6 +23,7 @@ impl HandleDispatchFrom<Client> for AcpConnectionHandler {
             // connection; the result is ignored on later requests.
             let _ = connection.client_cx.set(cx.clone());
             connection.start_thinking_effort_update_forwarder(&cx).await;
+            connection.start_pane_turn_forwarder(&cx).await;
 
             // InitializeRequest runs inline: it sets connection-scoped state
             // that later handlers read with defaults, so a pipelined
