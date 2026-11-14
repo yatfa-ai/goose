@@ -74,7 +74,7 @@ async fn effective_trigger_and_agent_execution_follow_the_current_model() -> Res
         ("GOOSE_DISABLE_SESSION_NAMING", Some("true")),
     ]);
     let config = Config::global();
-    assert_eq!(auto_compact_threshold(1_000_000), 0.225);
+    assert_eq!(auto_compact_threshold(1_000_000), 0.8);
     assert_eq!(auto_compact_threshold(200_000), 0.8);
     assert_eq!(auto_compact_threshold(0), 0.8);
 
