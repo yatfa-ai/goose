@@ -408,13 +408,28 @@ impl StateMachineServices {
     /// Fires `SessionStart` for a client opening the session and returns the hooks'
     /// banners, which the client shows before the first prompt.
     pub async fn emit_session_start(&self, session_id: &str) -> Result<Vec<String>> {
+        self.emit_session_start_with_source(session_id, crate::hooks::SessionStartSource::Startup)
+            .await
+    }
+
+    /// Fires `SessionStart` for a client that reset the session without a turn.
+    /// Records it like a client opening the session, so the next turn does not mistake
+    /// the emptied conversation for a new session and fire `startup` again.
+    pub async fn emit_session_start_with_source(
+        &self,
+        session_id: &str,
+        source: crate::hooks::SessionStartSource,
+    ) -> Result<Vec<String>> {
         let event = crate::hooks::HookEvent::SessionStart;
         if !self.hook_manager.has_hooks(event) {
             return Ok(Vec::new());
         }
         let banners = self
             .hook_manager
-            .emit_collecting_banners(event, crate::hooks::HookContext::new(event, session_id))
+            .emit_collecting_banners(
+                event,
+                crate::hooks::HookContext::new(event, session_id).with_session_start_source(source),
+            )
             .await;
         self.session_manager
             .add_message(

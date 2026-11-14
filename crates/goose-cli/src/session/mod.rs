@@ -1157,6 +1157,23 @@ impl CliSession {
             return Ok(());
         }
 
+        if let Err(e) = goose::session::TodoState::clear_for_session(
+            &self.services.session_manager,
+            &self.session_id,
+        )
+        .await
+        {
+            output::render_error(&format!("Failed to clear todo list: {}", e));
+            return Ok(());
+        }
+
+        self.services
+            .emit_session_start_with_source(
+                &self.session_id,
+                goose::hooks::SessionStartSource::Clear,
+            )
+            .await?;
+
         self.messages.clear();
         tracing::info!("Chat context cleared by user.");
         output::render_message(

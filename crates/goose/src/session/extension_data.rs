@@ -96,6 +96,22 @@ impl TodoState {
     pub fn new(content: String) -> Self {
         Self { content }
     }
+
+    /// The todo lives on the session, not in the conversation, so a cleared
+    /// conversation keeps being steered by it unless it is emptied too.
+    pub async fn clear_for_session(
+        session_manager: &SessionManager,
+        session_id: &str,
+    ) -> Result<()> {
+        session_manager
+            .set_extension_value(
+                session_id,
+                Self::EXTENSION_NAME,
+                Self::VERSION,
+                Self::new(String::new()).to_value()?,
+            )
+            .await
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -177,6 +177,7 @@ pub(crate) fn build_state_machine(
             model_config.clone(),
             context_limit,
             compaction_threshold,
+            hook_manager.clone(),
         )));
     }
     let remaining_operations: Vec<Arc<dyn Operation<Session, GooseEffect> + '_>> = vec![

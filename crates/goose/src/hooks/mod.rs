@@ -109,6 +109,43 @@ impl std::fmt::Display for HookEvent {
     }
 }
 
+/// What caused a [`HookEvent::SessionStart`].
+///
+/// A hook that re-runs mid-session is not always safe to run the way it runs at
+/// process start: at process start the working tree is disposable, mid-session
+/// it may hold work the agent has not committed. Without this the two are
+/// indistinguishable in the payload, so a hook has to assume the destructive
+/// case is fine — or never re-run at all.
+///
+/// The values match the vocabulary Claude Code already uses for the same field,
+/// so a hook script can read one key and work under both engines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionStartSource {
+    /// The session is new — this is the first turn of a freshly started process.
+    Startup,
+    /// The conversation was cleared mid-session (`/clear`).
+    Clear,
+    /// The conversation was compacted mid-session (`/compact`).
+    Compact,
+}
+
+impl SessionStartSource {
+    fn name(&self) -> &'static str {
+        match self {
+            SessionStartSource::Startup => "startup",
+            SessionStartSource::Clear => "clear",
+            SessionStartSource::Compact => "compact",
+        }
+    }
+}
+
+impl std::fmt::Display for SessionStartSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Top-level `hooks.json` shape.
 #[derive(Debug, Default, Deserialize)]
 struct HooksFile {
     #[serde(default)]
@@ -230,6 +267,9 @@ pub struct HookContext {
     /// call, which tool name plus input cannot do when a call repeats.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// For `SessionStart` only: what triggered it. See [`SessionStartSource`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -264,6 +304,7 @@ impl HookContext {
             session_id: session_id.into(),
             matcher_context: None,
             tool_call_id: None,
+            source: None,
             tool_name: None,
             tool_input: None,
             tool_output: None,
@@ -275,6 +316,13 @@ impl HookContext {
             blocked_by: None,
             reason: None,
         }
+    }
+
+    /// Label a `SessionStart` with what triggered it, so a hook can tell a real
+    /// process start from a mid-session clear or compaction.
+    pub fn with_session_start_source(mut self, source: SessionStartSource) -> Self {
+        self.source = Some(source.to_string());
+        self
     }
 
     pub fn with_tool(mut self, tool_name: impl Into<String>, tool_input: Option<Value>) -> Self {

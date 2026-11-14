@@ -6,7 +6,7 @@ use crate::agents::state_machine::usage;
 use crate::agents::AgentEvent;
 use crate::conversation::message::{ActionRequiredData, Message, MessageContent};
 use crate::conversation::Conversation;
-use crate::hooks::{HookContext, HookEvent, HookManager};
+use crate::hooks::{HookContext, HookEvent, HookManager, SessionStartSource};
 use crate::session::{Session, SessionManager};
 use goose_agent::machine::{EffectHandler, EffectUsage, MachineSession, SessionLoader};
 use goose_agent::operation::{ConversationEffect, Emitter, MachineEffect};
@@ -274,6 +274,52 @@ fn is_session_start_message(message: &Message) -> bool {
         .is_some()
 }
 
+/// Whether the session had already started before the current kickoff message: a client
+/// fired `SessionStart` when it opened the session, or the user already spoke. This is
+/// persisted with the conversation, so a resumed session never starts a second time.
+fn started_before_kickoff(conversation: &Conversation) -> Result<bool> {
+    let messages = crate::agents::state_machine::messages_since_kickoff(conversation)?;
+    Ok(
+        conversation.messages()[..conversation.len() - messages.len()]
+            .iter()
+            .any(|message| {
+                is_session_start_message(message)
+                    || (message.role == rmcp::model::Role::User
+                        && message.is_user_visible()
+                        && !message.is_tool_response())
+            }),
+    )
+}
+
+/// Fires `SessionStart` for `/clear` or `/compact`, unless this very turn is what starts
+/// the session: the turn's own `startup` is then the session's only `SessionStart`.
+pub(crate) async fn emit_session_start_after_reset(
+    hook_manager: &HookManager,
+    session: &Session,
+    conversation: &Conversation,
+    source: SessionStartSource,
+) -> Result<()> {
+    if started_before_kickoff(conversation)? {
+        emit_session_start(hook_manager, session, source).await;
+    }
+    Ok(())
+}
+
+async fn emit_session_start(
+    hook_manager: &HookManager,
+    session: &Session,
+    source: SessionStartSource,
+) {
+    hook_manager
+        .emit(
+            HookEvent::SessionStart,
+            HookContext::new(HookEvent::SessionStart, &session.id)
+                .with_working_dir(session.working_dir.to_string_lossy().to_string())
+                .with_session_start_source(source),
+        )
+        .await;
+}
+
 pub(crate) async fn run_turn_start_hooks(
     hook_manager: &HookManager,
     session: &Session,
@@ -290,22 +336,10 @@ pub(crate) async fn run_turn_start_hooks(
         return Ok(());
     }
 
-    let working_dir = session.working_dir.to_string_lossy().to_string();
-    let messages_before_kickoff = &conversation.messages()[..conversation.len() - messages.len()];
-    if !messages_before_kickoff.iter().any(|message| {
-        is_session_start_message(message)
-            || (message.role == rmcp::model::Role::User
-                && message.is_user_visible()
-                && !message.is_tool_response())
-    }) {
-        hook_manager
-            .emit(
-                HookEvent::SessionStart,
-                HookContext::new(HookEvent::SessionStart, &session.id)
-                    .with_working_dir(working_dir.clone()),
-            )
-            .await;
+    if !started_before_kickoff(conversation)? {
+        emit_session_start(hook_manager, session, SessionStartSource::Startup).await;
     }
+    let working_dir = session.working_dir.to_string_lossy().to_string();
 
     let prompt = messages
         .first()

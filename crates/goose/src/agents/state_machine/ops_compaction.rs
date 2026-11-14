@@ -9,14 +9,16 @@ use tracing_futures::Instrument;
 use crate::agents::state_machine::ops_llm::{chat_span, record_chat_usage};
 use crate::agents::state_machine::proactive_compaction::proactive_compaction_tokens;
 use crate::agents::state_machine::{
-    applied, messages_since_kickoff, not_applicable, trailing_error, yielded_with,
-    ConversationEffect, Emitter, GooseEffect, Operation, OperationResult, SlashCommand,
+    applied, emit_session_start_after_reset, messages_since_kickoff, not_applicable,
+    trailing_error, yielded_with, ConversationEffect, Emitter, GooseEffect, Operation,
+    OperationResult, SlashCommand,
 };
 use crate::context_mgmt::compact_messages;
 use crate::conversation::message::{Message, MessageErrorKind, SystemNotificationType};
 use crate::conversation::Conversation;
+use crate::hooks::{HookManager, SessionStartSource};
 use crate::providers::base::Provider;
-use crate::session::Session;
+use crate::session::{Session, TodoState};
 use goose_providers::errors::ProviderError;
 use goose_providers::model::ModelConfig;
 
@@ -30,6 +32,7 @@ pub struct CompactionOperation {
     context_limit: usize,
     threshold: f64,
     manages_own_context: bool,
+    hook_manager: HookManager,
 }
 
 impl CompactionOperation {
@@ -38,6 +41,7 @@ impl CompactionOperation {
         model_config: ModelConfig,
         context_limit: usize,
         threshold: f64,
+        hook_manager: HookManager,
     ) -> Self {
         let manages_own_context = provider.manages_own_context();
         Self {
@@ -46,6 +50,7 @@ impl CompactionOperation {
             context_limit,
             threshold,
             manages_own_context,
+            hook_manager,
         }
     }
 
@@ -77,7 +82,12 @@ impl CompactionOperation {
         ])
     }
 
-    fn clear(conversation: &Conversation, emit: &Emitter) -> Result<OperationResult<GooseEffect>> {
+    async fn clear(
+        &self,
+        session: &Session,
+        conversation: &Conversation,
+        emit: &Emitter,
+    ) -> Result<OperationResult<GooseEffect>> {
         let command = messages_since_kickoff(conversation)?
             .first()
             .cloned()
@@ -88,8 +98,18 @@ impl CompactionOperation {
             .with_visibility(true, false);
         let command = emit.message(command);
         let response = emit.message(response);
+        emit_session_start_after_reset(
+            &self.hook_manager,
+            session,
+            conversation,
+            SessionStartSource::Clear,
+        )
+        .await?;
         yielded_with([
             Conversation::default().into(),
+            // The todo lives on the session, not in the conversation, so it would
+            // otherwise keep steering every later turn.
+            GooseEffect::extension_state(&TodoState::new(String::new()))?,
             command.into(),
             response.into(),
         ])
@@ -110,7 +130,7 @@ impl Operation<Session, GooseEffect> for CompactionOperation {
         emit: &Emitter,
     ) -> Result<OperationResult<GooseEffect>> {
         match command.command {
-            "clear" => return Self::clear(conversation, emit),
+            "clear" => return self.clear(session, conversation, emit).await,
             "compact" => {}
             _ => return not_applicable(),
         }
@@ -151,6 +171,13 @@ impl Operation<Session, GooseEffect> for CompactionOperation {
             .with_visibility(true, false);
         emit.message(command);
         let response = emit.message(response);
+        emit_session_start_after_reset(
+            &self.hook_manager,
+            session,
+            conversation,
+            SessionStartSource::Compact,
+        )
+        .await?;
         yielded_with([
             GooseEffect::CompactConversation {
                 conversation: compacted,

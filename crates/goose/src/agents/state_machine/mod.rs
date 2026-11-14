@@ -33,7 +33,7 @@ mod proactive_compaction;
 mod session;
 mod stop_hook;
 pub(crate) use session::run as run_goose;
-pub(crate) use session::session_start_message;
+pub(crate) use session::{emit_session_start_after_reset, session_start_message};
 mod tool_approval;
 mod tool_confirmation;
 mod usage;
