@@ -665,7 +665,7 @@ fn usage_from_anthropic_fields(usage: &Value) -> Usage {
         usage
             .get(key)
             .and_then(|v| v.as_u64())
-            .map(|v| v.min(i32::MAX as u64) as i32)
+            .map(|v| v.min(i64::MAX as u64) as i64)
     };
 
     Usage::from_cache_exclusive_input(

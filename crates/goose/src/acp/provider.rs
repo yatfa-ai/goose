@@ -167,6 +167,16 @@ enum AcpUpdate {
 /// and the memo is the only part we added — but a spent account or a missing credential
 /// says nothing about the prompt at all, so retrying would burn the single fallback the
 /// session gets and consume a memo the agent never actually refused.
+/// Narrow a token count that arrived over the ACP wire as `u64`.
+///
+/// Saturating rather than `as`: this is untrusted input from another agent, and
+/// the previous `as i32` wrapped silently — a count above i32::MAX became a
+/// NEGATIVE token count, with no error anywhere. i64 makes the clamp
+/// unreachable in practice (9.2e18 tokens), which is the point.
+fn clamp_wire_tokens(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
 fn retry_without_memo_could_help(error: &agent_client_protocol::Error) -> bool {
     if error.code == agent_client_protocol::schema::v1::ErrorCode::AuthRequired {
         return false;
@@ -1073,10 +1083,14 @@ impl Provider for AcpProvider {
                         if let Some(usage) = usage {
                             let provider_usage = ProviderUsage::new(
                                 model_name.clone(),
+                                // Saturating, not `as`: these arrive as u64
+                                // over the wire from another agent, and the
+                                // old `as i32` WRAPPED silently — a large
+                                // count landed as a negative one.
                                 Usage::new(
-                                    Some(usage.input_tokens as i32),
-                                    Some(usage.output_tokens as i32),
-                                    Some(usage.total_tokens as i32),
+                                    Some(clamp_wire_tokens(usage.input_tokens)),
+                                    Some(clamp_wire_tokens(usage.output_tokens)),
+                                    Some(clamp_wire_tokens(usage.total_tokens)),
                                 ),
                             );
                             yield (None, Some(provider_usage));

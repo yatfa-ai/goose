@@ -409,7 +409,7 @@ pub fn get_usage(data: &Value) -> Result<Usage> {
         let input_tokens = usage_meta_data
             .get("promptTokenCount")
             .and_then(|v| v.as_u64())
-            .map(|v| v as i32);
+            .map(|v| v as i64);
         // `candidatesTokenCount` is the visible output; thinking models
         // (Gemini 2.5/3) report reasoning tokens separately in
         // `thoughtsTokenCount`, and per the API spec `totalTokenCount` =
@@ -426,19 +426,21 @@ pub fn get_usage(data: &Value) -> Result<Usage> {
             .and_then(|v| v.as_u64());
         let output_tokens = match (candidates_tokens, thoughts_tokens) {
             (None, None) => None,
-            (candidates, thoughts) => {
-                Some((candidates.unwrap_or(0) + thoughts.unwrap_or(0)) as i32)
-            }
+            (candidates, thoughts) => Some(
+                candidates
+                    .unwrap_or(0)
+                    .saturating_add(thoughts.unwrap_or(0)) as i64,
+            ),
         };
         let total_tokens = usage_meta_data
             .get("totalTokenCount")
             .and_then(|v| v.as_u64())
-            .map(|v| v as i32);
+            .map(|v| v as i64);
         // promptTokenCount already includes cachedContentTokenCount
         let cached_tokens = usage_meta_data
             .get("cachedContentTokenCount")
             .and_then(|v| v.as_u64())
-            .map(|v| v as i32);
+            .map(|v| v as i64);
         Ok(Usage::new(input_tokens, output_tokens, total_tokens)
             .with_cache_tokens(cached_tokens, None))
     } else {

@@ -102,19 +102,21 @@ impl ProviderUsage {
 pub struct Usage {
     /// All prompt tokens, including any served from or written to cache.
     /// `cache_read_input_tokens` and `cache_write_input_tokens` are subsets of this.
-    pub input_tokens: Option<i32>,
-    pub output_tokens: Option<i32>,
-    pub total_tokens: Option<i32>,
-    pub cache_read_input_tokens: Option<i32>,
-    pub cache_write_input_tokens: Option<i32>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+    pub cache_read_input_tokens: Option<i64>,
+    pub cache_write_input_tokens: Option<i64>,
 }
 
-fn sum_optionals<T>(a: Option<T>, b: Option<T>) -> Option<T>
-where
-    T: Add<Output = T>,
-{
+// Saturating, like every other arithmetic path on this type (`Usage::new` and
+// `from_cache_exclusive_input` already use `saturating_add`). Before this it was
+// a bare `+`, i.e. the ONE path that could panic in debug and wrap in release —
+// and it was the accumulator, which runs on every turn. The generic is gone with
+// it: `impl Add for Usage` is the only caller.
+fn sum_optionals(a: Option<i64>, b: Option<i64>) -> Option<i64> {
     match (a, b) {
-        (Some(x), Some(y)) => Some(x + y),
+        (Some(x), Some(y)) => Some(x.saturating_add(y)),
         (Some(x), None) => Some(x),
         (None, Some(y)) => Some(y),
         (None, None) => None,
@@ -148,9 +150,9 @@ impl AddAssign for Usage {
 
 impl Usage {
     pub fn new(
-        input_tokens: Option<i32>,
-        output_tokens: Option<i32>,
-        total_tokens: Option<i32>,
+        input_tokens: Option<i64>,
+        output_tokens: Option<i64>,
+        total_tokens: Option<i64>,
     ) -> Self {
         let calculated_total = if total_tokens.is_none() {
             match (input_tokens, output_tokens) {
@@ -174,8 +176,8 @@ impl Usage {
 
     pub fn with_cache_tokens(
         mut self,
-        cache_read_input_tokens: Option<i32>,
-        cache_write_input_tokens: Option<i32>,
+        cache_read_input_tokens: Option<i64>,
+        cache_write_input_tokens: Option<i64>,
     ) -> Self {
         self.cache_read_input_tokens = cache_read_input_tokens;
         self.cache_write_input_tokens = cache_write_input_tokens;
@@ -185,11 +187,11 @@ impl Usage {
     /// For providers whose reported `input_tokens`/`total_tokens` exclude
     /// cache tokens (e.g. Anthropic): folds the cache breakdown in.
     pub fn from_cache_exclusive_input(
-        input_tokens: Option<i32>,
-        output_tokens: Option<i32>,
-        total_tokens: Option<i32>,
-        cache_read_input_tokens: Option<i32>,
-        cache_write_input_tokens: Option<i32>,
+        input_tokens: Option<i64>,
+        output_tokens: Option<i64>,
+        total_tokens: Option<i64>,
+        cache_read_input_tokens: Option<i64>,
+        cache_write_input_tokens: Option<i64>,
     ) -> Self {
         let cache_tokens = cache_read_input_tokens
             .unwrap_or(0)
